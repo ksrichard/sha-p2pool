@@ -14,19 +14,19 @@ use libp2p::{
     gossipsub::{IdentTopic, Message, PublishError},
     identity::Keypair,
     kad,
-    kad::{store::MemoryStore, Event, Mode},
+    kad::{Event, Mode, store::MemoryStore},
     mdns,
     mdns::tokio::Tokio,
+    Multiaddr,
     multiaddr::Protocol,
     noise,
     request_response,
     request_response::{cbor, ResponseChannel},
+    StreamProtocol,
     swarm::{NetworkBehaviour, SwarmEvent},
+    Swarm,
     tcp,
     yamux,
-    Multiaddr,
-    StreamProtocol,
-    Swarm,
 };
 use log::{debug, error, info, warn};
 use tari_common::configuration::Network;
@@ -44,6 +44,8 @@ use crate::{
         config,
         p2p::{
             client,
+            Error,
+            LibP2PError,
             messages,
             messages::{
                 PeerInfo,
@@ -53,8 +55,6 @@ use crate::{
                 ValidateBlockResult,
             },
             peer_store::PeerStore,
-            Error,
-            LibP2PError,
             ServiceClient,
             ServiceClientChannels,
         },
@@ -102,7 +102,7 @@ pub struct ServerNetworkBehaviour {
 /// Service is the implementation that holds every peer-to-peer related logic
 /// that makes sure that all the communications, syncing, broadcasting etc... are done.
 pub struct Service<S>
-where S: ShareChain + Send + Sync + 'static
+    where S: ShareChain + Send + Sync + 'static
 {
     swarm: Swarm<ServerNetworkBehaviour>,
     port: u16,
@@ -122,7 +122,7 @@ where S: ShareChain + Send + Sync + 'static
 }
 
 impl<S> Service<S>
-where S: ShareChain + Send + Sync + 'static
+    where S: ShareChain + Send + Sync + 'static
 {
     /// Constructs a new Service from the provided config.
     /// It also instantiates libp2p swarm inside.
@@ -274,15 +274,15 @@ where S: ShareChain + Send + Sync + 'static
                         ) {
                             error!(target: LOG_TARGET, "Failed to send block validation request: {error:?}");
                         }
-                    },
+                    }
                     Err(error) => {
                         error!(target: LOG_TARGET, "Failed to convert block validation request to bytes: {error:?}");
-                    },
+                    }
                 }
-            },
+            }
             Err(error) => {
                 error!(target: LOG_TARGET, "Block validation request receive error: {error:?}");
-            },
+            }
         }
     }
 
@@ -297,10 +297,10 @@ where S: ShareChain + Send + Sync + 'static
                 ) {
                     error!(target: LOG_TARGET, "Failed to publish block validation result: {error:?}");
                 }
-            },
+            }
             Err(error) => {
                 error!(target: LOG_TARGET, "Failed to convert block validation result to bytes: {error:?}");
-            },
+            }
         }
     }
 
@@ -309,8 +309,8 @@ where S: ShareChain + Send + Sync + 'static
     async fn broadcast_peer_info(&mut self) -> Result<(), Error> {
         // get peer info
         let share_chain = self.share_chain.clone();
-        let current_height = share_chain.tip_height().await.map_err(Error::ShareChain)?;
-        let peer_info_raw: Vec<u8> = PeerInfo::new(current_height).try_into()?;
+        let last_block = share_chain.last_block().await?;
+        let peer_info_raw: Vec<u8> = PeerInfo::new(last_block).try_into()?;
 
         // broadcast peer info
         self.swarm
@@ -336,17 +336,17 @@ where S: ShareChain + Send + Sync + 'static
                             .publish(IdentTopic::new(Self::topic_name(NEW_BLOCK_TOPIC)), block_raw)
                             .map_err(|error| Error::LibP2P(LibP2PError::Publish(error)))
                         {
-                            Ok(_) => {},
+                            Ok(_) => {}
                             Err(error) => {
                                 error!(target: LOG_TARGET, "Failed to broadcast new block: {error:?}")
-                            },
+                            }
                         }
-                    },
+                    }
                     Err(error) => {
                         error!(target: LOG_TARGET, "Failed to convert block to bytes: {error:?}")
-                    },
+                    }
                 }
-            },
+            }
             Err(error) => error!(target: LOG_TARGET, "Failed to receive new block: {error:?}"),
         }
     }
@@ -391,17 +391,18 @@ where S: ShareChain + Send + Sync + 'static
                 Ok(payload) => {
                     debug!(target: LOG_TARGET, "New peer info: {peer:?} -> {payload:?}");
                     self.peer_store.add(peer, payload).await;
-                    if let Some(tip) = self.peer_store.tip_of_block_height().await {
-                        if let Ok(curr_height) = self.share_chain.tip_height().await {
-                            if curr_height < tip.height {
+                    if let Some(tip) = self.peer_store.strongest_chain().await {
+                        if let Ok(last_block) = self.share_chain.last_block().await {
+                            if last_block.accumulated_data().accumulated_sha3x_difficulty.as_u128() <
+                                tip.block.accumulated_data().accumulated_sha3x_difficulty.as_u128() {
                                 self.sync_share_chain().await;
                             }
                         }
                     }
-                },
+                }
                 Err(error) => {
                     error!(target: LOG_TARGET, "Can't deserialize peer info payload: {:?}", error);
-                },
+                }
             },
             topic if topic == Self::topic_name(BLOCK_VALIDATION_REQUESTS_TOPIC) => {
                 match messages::ValidateBlockRequest::try_from(message) {
@@ -425,12 +426,12 @@ where S: ShareChain + Send + Sync + 'static
                         let validate_result =
                             ValidateBlockResult::new(*self.swarm.local_peer_id(), payload.block(), valid);
                         self.send_block_validation_result(validate_result).await;
-                    },
+                    }
                     Err(error) => {
                         error!(target: LOG_TARGET, "Can't deserialize block validation request payload: {:?}", error);
-                    },
+                    }
                 }
-            },
+            }
             topic if topic == Self::topic_name(BLOCK_VALIDATION_RESULTS_TOPIC) => {
                 match messages::ValidateBlockResult::try_from(message) {
                     Ok(payload) => {
@@ -444,12 +445,12 @@ where S: ShareChain + Send + Sync + 'static
                         senders_to_delete.iter().for_each(|i| {
                             self.client_validate_block_res_txs.remove(*i);
                         });
-                    },
+                    }
                     Err(error) => {
                         error!(target: LOG_TARGET, "Can't deserialize block validation request payload: {:?}", error);
-                    },
+                    }
                 }
-            },
+            }
             // TODO: send a signature that proves that the actual block was coming from this peer
             topic if topic == Self::topic_name(NEW_BLOCK_TOPIC) => match Block::try_from(message) {
                 Ok(payload) => {
@@ -457,14 +458,14 @@ where S: ShareChain + Send + Sync + 'static
                     if let Err(error) = self.share_chain.submit_block(&payload).await {
                         error!(target: LOG_TARGET, "Could not add new block to local share chain: {error:?}");
                     }
-                },
+                }
                 Err(error) => {
                     error!(target: LOG_TARGET, "Can't deserialize broadcast block payload: {:?}", error);
-                },
+                }
             },
             _ => {
                 warn!(target: LOG_TARGET, "Unknown topic {topic:?}!");
-            },
+            }
         }
     }
 
@@ -486,7 +487,7 @@ where S: ShareChain + Send + Sync + 'static
                 {
                     error!(target: LOG_TARGET, "Failed to send block sync response");
                 }
-            },
+            }
             Err(error) => error!(target: LOG_TARGET, "Failed to get blocks from height: {error:?}"),
         }
     }
@@ -501,29 +502,30 @@ where S: ShareChain + Send + Sync + 'static
         }
     }
 
+    // TODO: fix to call it to have the same chain initially
     /// Trigger share chai sync with another peer with the highest known block height.
     async fn sync_share_chain(&mut self) {
         debug!(target: LOG_TARGET, "Syncing share chain...");
-        while self.peer_store.tip_of_block_height().await.is_none() {} // waiting for the highest blockchain
-        match self.peer_store.tip_of_block_height().await {
+        while self.peer_store.strongest_chain().await.is_none() {} // waiting for the strongest blockchain
+        match self.peer_store.strongest_chain().await {
             Some(result) => {
                 debug!(target: LOG_TARGET, "Found highest block height: {result:?}");
-                match self.share_chain.tip_height().await {
-                    Ok(tip) => {
+                match self.share_chain.last_block().await {
+                    Ok(last_block) => {
                         debug!(target: LOG_TARGET, "Send share chain sync request: {result:?}");
                         self.swarm
                             .behaviour_mut()
                             .share_chain_sync
-                            .send_request(&result.peer_id, ShareChainSyncRequest::new(tip));
-                    },
+                            .send_request(&result.peer_id, ShareChainSyncRequest::new(last_block.height()));
+                    }
                     Err(error) => {
                         error!(target: LOG_TARGET, "Failed to get latest height of share chain: {error:?}")
-                    },
+                    }
                 }
-            },
+            }
             None => {
                 error!(target: LOG_TARGET, "Failed to get peer with highest share chain height!")
-            },
+            }
         }
     }
 
@@ -532,7 +534,7 @@ where S: ShareChain + Send + Sync + 'static
         match event {
             SwarmEvent::NewListenAddr { address, .. } => {
                 info!(target: LOG_TARGET, "Listening on {address:?}");
-            },
+            }
             SwarmEvent::Behaviour(event) => match event {
                 ServerNetworkBehaviourEvent::Mdns(mdns_event) => match mdns_event {
                     mdns::Event::Discovered(peers) => {
@@ -540,12 +542,12 @@ where S: ShareChain + Send + Sync + 'static
                             self.swarm.add_peer_address(peer, addr);
                             self.swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer);
                         }
-                    },
+                    }
                     mdns::Event::Expired(peers) => {
                         for (peer, _addr) in peers {
                             self.swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer);
                         }
-                    },
+                    }
                 },
                 ServerNetworkBehaviourEvent::Gossipsub(event) => match event {
                     gossipsub::Event::Message {
@@ -554,10 +556,10 @@ where S: ShareChain + Send + Sync + 'static
                         propagation_source: _propagation_source,
                     } => {
                         self.handle_new_gossipsub_message(message).await;
-                    },
-                    gossipsub::Event::Subscribed { .. } => {},
-                    gossipsub::Event::Unsubscribed { .. } => {},
-                    gossipsub::Event::GossipsubNotSupported { .. } => {},
+                    }
+                    gossipsub::Event::Subscribed { .. } => {}
+                    gossipsub::Event::Unsubscribed { .. } => {}
+                    gossipsub::Event::GossipsubNotSupported { .. } => {}
                 },
                 ServerNetworkBehaviourEvent::ShareChainSync(event) => match event {
                     request_response::Event::Message { peer: _peer, message } => match message {
@@ -567,21 +569,21 @@ where S: ShareChain + Send + Sync + 'static
                             channel,
                         } => {
                             self.handle_share_chain_sync_request(channel, request).await;
-                        },
+                        }
                         request_response::Message::Response {
                             request_id: _request_id,
                             response,
                         } => {
                             self.handle_share_chain_sync_response(response).await;
-                        },
+                        }
                     },
                     request_response::Event::OutboundFailure { peer, error, .. } => {
                         error!(target: LOG_TARGET, "REQ-RES outbound failure: {peer:?} -> {error:?}");
-                    },
+                    }
                     request_response::Event::InboundFailure { peer, error, .. } => {
                         error!(target: LOG_TARGET, "REQ-RES inbound failure: {peer:?} -> {error:?}");
-                    },
-                    request_response::Event::ResponseSent { .. } => {},
+                    }
+                    request_response::Event::ResponseSent { .. } => {}
                 },
                 ServerNetworkBehaviourEvent::Kademlia(event) => match event {
                     Event::RoutingUpdated {
@@ -600,11 +602,11 @@ where S: ShareChain + Send + Sync + 'static
                                 error!(target: LOG_TARGET, "Failed to send peer changes trigger: {error:?}");
                             }
                         }
-                    },
+                    }
                     _ => debug!(target: LOG_TARGET, "[KADEMLIA] {event:?}"),
                 },
             },
-            _ => {},
+            _ => {}
         };
     }
 

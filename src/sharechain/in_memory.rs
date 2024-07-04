@@ -7,17 +7,19 @@ use async_trait::async_trait;
 use log::{debug, error, info, warn};
 use minotari_app_grpc::tari_rpc::{NewBlockCoinbase, SubmitBlockRequest};
 use tari_common_types::tari_address::TariAddress;
-use tari_core::blocks::BlockHeader;
-use tari_utilities::{epoch_time::EpochTime, hex::Hex};
+use tari_common_types::types::{FixedHash, HashOutput};
+use tari_core::blocks::{BlockHeader, BlockHeaderAccumulatedData};
+use tari_core::proof_of_work::{AchievedTargetDifficulty, Difficulty, sha3x_difficulty};
+use tari_utilities::{ByteArray, epoch_time::EpochTime, hex::Hex};
 use tokio::sync::{RwLock, RwLockWriteGuard};
 
 use crate::sharechain::{
-    error::{BlockConvertError, Error},
     Block,
-    ShareChain,
-    ShareChainResult,
+    error::{BlockConvertError, Error},
     MAX_BLOCKS_COUNT,
     SHARE_COUNT,
+    ShareChain,
+    ShareChainResult,
 };
 
 const LOG_TARGET: &str = "in_memory_share_chain";
@@ -27,14 +29,17 @@ pub struct InMemoryShareChain {
     blocks: Arc<RwLock<Vec<Block>>>,
 }
 
+fn genesis_block() -> Block {
+    Block::builder(BlockHeaderAccumulatedData {
+        ..Default::default()
+    }).build()
+}
+
 impl Default for InMemoryShareChain {
     fn default() -> Self {
         Self {
             max_blocks_count: MAX_BLOCKS_COUNT,
-            blocks: Arc::new(RwLock::new(vec![
-                // genesis block
-                Block::builder().with_height(0).build(),
-            ])),
+            blocks: Arc::new(RwLock::new(vec![genesis_block()])),
         }
     }
 }
@@ -44,10 +49,7 @@ impl InMemoryShareChain {
     pub fn new(max_blocks_count: usize) -> Self {
         Self {
             max_blocks_count,
-            blocks: Arc::new(RwLock::new(vec![
-                // genesis block
-                Block::builder().with_height(0).build(),
-            ])),
+            blocks: Arc::new(RwLock::new(vec![genesis_block()])),
         }
     }
 
@@ -55,6 +57,7 @@ impl InMemoryShareChain {
         let mut result: HashMap<String, f64> = HashMap::new(); // target wallet address -> number of shares
         let blocks_read_lock = self.blocks.read().await;
         blocks_read_lock.iter().for_each(|block| {
+            // add main shares
             if let Some(miner_wallet_address) = block.miner_wallet_address() {
                 let addr = miner_wallet_address.to_base58();
                 if let Some(curr_hash_rate) = result.get(&addr) {
@@ -63,14 +66,20 @@ impl InMemoryShareChain {
                     result.insert(addr, 1.0);
                 }
             }
+
+            // TODO: continue
+            // add uncle shares
+            for uncle_block in block.uncles() {}
         });
 
         result
     }
 
-    async fn validate_block(&self, last_block: &Block, block: &Block) -> ShareChainResult<bool> {
+    async fn validate_block(&self, blocks: &mut RwLockWriteGuard<'_, Vec<Block>>, block: &Block) -> ShareChainResult<bool> {
+        let last_block = blocks.last().ok_or_else(|| Error::Empty)?.clone();
+
         // check if we have this block as last
-        if last_block == block {
+        if &last_block == block || last_block.hash() == block.hash() {
             warn!(target: LOG_TARGET, "↩️ This block already added, skip");
             return Ok(false);
         }
@@ -81,9 +90,12 @@ impl InMemoryShareChain {
             return Ok(false);
         }
 
-        // validate height
-        if last_block.height() + 1 != block.height() {
-            warn!(target: LOG_TARGET, "❌ Invalid block, invalid block height: {:?} != {:?}", last_block.height() + 1, block.height());
+        // validate accumulated difficulty
+        // TODO: finish impl
+        if last_block.accumulated_data().accumulated_sha3x_difficulty >
+            block.accumulated_data().accumulated_sha3x_difficulty {
+            // TODO: handle this scenario as uncle block
+            warn!(target: LOG_TARGET, "❌ Invalid block, accumulated difficulty is lower! Latest: {:?} >= New: {:?}", last_block.accumulated_data().accumulated_sha3x_difficulty, block.accumulated_data().accumulated_sha3x_difficulty);
             return Ok(false);
         }
 
@@ -96,23 +108,19 @@ impl InMemoryShareChain {
         block: &Block,
         in_sync: bool,
     ) -> ShareChainResult<()> {
-        let block = block.clone();
+        let mut block = block.clone();
 
         let last_block = blocks.last();
-        if in_sync && last_block.is_some() {
+        block.set_height(last_block.unwrap().height() + 1); // TODO: handle error
+
+        if (in_sync && last_block.is_some()) || (!in_sync && last_block.is_some()) {
             // validate
-            if !self.validate_block(last_block.unwrap(), &block).await? {
+            if !self.validate_block(blocks, &block).await? {
                 error!(target: LOG_TARGET, "Invalid block!");
-                return Err(Error::InvalidBlock(block));
+                return Err(Error::InvalidBlock(block.clone()));
             }
         } else if !in_sync && last_block.is_none() {
             return Err(Error::Empty);
-        } else if !in_sync && last_block.is_some() {
-            // validate
-            if !self.validate_block(last_block.unwrap(), &block).await? {
-                error!(target: LOG_TARGET, "Invalid block!");
-                return Err(Error::InvalidBlock(block));
-            }
         }
 
         if blocks.len() >= self.max_blocks_count {
@@ -121,7 +129,6 @@ impl InMemoryShareChain {
         }
 
         info!(target: LOG_TARGET, "🆕 New block added: {:?}", block.hash().to_hex());
-
         blocks.push(block);
 
         let last_block = blocks.last().ok_or_else(|| Error::Empty)?;
@@ -156,10 +163,10 @@ impl ShareChain for InMemoryShareChain {
         Ok(())
     }
 
-    async fn tip_height(&self) -> ShareChainResult<u64> {
+    async fn last_block(&self) -> ShareChainResult<Block> {
         let blocks_read_lock = self.blocks.read().await;
         let last_block = blocks_read_lock.last().ok_or_else(|| Error::Empty)?;
-        Ok(last_block.height())
+        Ok(last_block.clone())
     }
 
     async fn generate_shares(&self, reward: u64) -> Vec<NewBlockCoinbase> {
@@ -201,10 +208,23 @@ impl ShareChain for InMemoryShareChain {
         let blocks_read_lock = self.blocks.read().await;
         let last_block = blocks_read_lock.last().ok_or_else(|| Error::Empty)?;
 
-        Ok(Block::builder()
+        // generate accumulated data
+        let origin_block_header_copy = origin_block_header.clone();
+        let achieved_difficulty = sha3x_difficulty(&origin_block_header_copy).unwrap();
+        let target_difficulty = achieved_difficulty;
+        let acc_data = BlockHeaderAccumulatedData::builder(last_block.accumulated_data())
+            .with_hash(HashOutput::from(origin_block_header_copy.hash()))
+            .with_achieved_target_difficulty(AchievedTargetDifficulty::try_construct(
+                origin_block_header_copy.pow_algo(),
+                target_difficulty,
+                achieved_difficulty,
+            ).unwrap()) // TODO: handle error
+            .with_total_kernel_offset(origin_block_header_copy.total_kernel_offset)
+            .build().unwrap(); // TODO: handle error
+
+        Ok(Block::builder(acc_data)
             .with_timestamp(EpochTime::now())
             .with_prev_hash(last_block.generate_hash())
-            .with_height(last_block.height() + 1)
             .with_original_block_header(origin_block_header)
             .with_miner_wallet_address(
                 TariAddress::from_hex(request.wallet_payment_address.as_str()).map_err(Error::TariAddress)?,
@@ -222,8 +242,7 @@ impl ShareChain for InMemoryShareChain {
     }
 
     async fn validate_block(&self, block: &Block) -> ShareChainResult<bool> {
-        let blocks_read_lock = self.blocks.read().await;
-        let last_block = blocks_read_lock.last().ok_or_else(|| Error::Empty)?;
-        self.validate_block(last_block, block).await
+        let mut blocks_write_lock = self.blocks.write().await;
+        self.validate_block(&mut blocks_write_lock, block).await
     }
 }

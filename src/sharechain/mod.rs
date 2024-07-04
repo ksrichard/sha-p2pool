@@ -25,8 +25,8 @@ pub trait ShareChain {
     /// While this operation runs, no other blocks can be added until it's done.
     async fn submit_blocks(&self, blocks: Vec<Block>, sync: bool) -> ShareChainResult<()>;
 
-    /// Returns the tip of height in chain.
-    async fn tip_height(&self) -> ShareChainResult<u64>;
+    /// Returns the last block in the chain (tip of chain).
+    async fn last_block(&self) -> ShareChainResult<Block>;
 
     /// Generate shares based on the previous blocks.
     async fn generate_shares(&self, reward: u64) -> Vec<NewBlockCoinbase>;
