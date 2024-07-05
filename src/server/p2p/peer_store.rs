@@ -10,6 +10,7 @@ use std::ops::Deref;
 use libp2p::PeerId;
 use log::debug;
 use moka::future::{Cache, CacheBuilder};
+use tari_core::proof_of_work::AccumulatedDifficulty;
 
 use crate::server::p2p::messages::PeerInfo;
 use crate::sharechain::block::Block;
@@ -49,12 +50,12 @@ impl PeerStoreRecord {
 #[derive(Clone, Debug)]
 pub struct PeerStoreStrongestChain {
     pub peer_id: PeerId,
-    pub block: Block,
+    pub chain_difficulty: AccumulatedDifficulty,
 }
 
 impl PeerStoreStrongestChain {
-    pub fn new(peer_id: PeerId, block: Block) -> Self {
-        Self { peer_id, block }
+    pub fn new(peer_id: PeerId, chain_difficulty: AccumulatedDifficulty) -> Self {
+        Self { peer_id, chain_difficulty }
     }
 }
 
@@ -64,8 +65,8 @@ pub struct PeerStore {
     inner: Cache<PeerId, PeerStoreRecord>,
     // Max time to live for the items to avoid non-existing peers in list.
     ttl: Duration,
-    // Peer with the highest share chain height.
-    tip_of_block_height: RwLock<Option<PeerStoreStrongestChain>>,
+    // Peer with the strongest share chain.
+    strongest_chain: RwLock<Option<PeerStoreStrongestChain>>,
 }
 
 impl PeerStore {
@@ -76,7 +77,7 @@ impl PeerStore {
                 .time_to_live(config.peer_record_ttl * 2)
                 .build(),
             ttl: config.peer_record_ttl,
-            tip_of_block_height: RwLock::new(None),
+            strongest_chain: RwLock::new(None),
         }
     }
 
@@ -98,18 +99,18 @@ impl PeerStore {
         if let Some((k, v)) = self
             .inner
             .iter()
-            .max_by(|(_k1, v1), (_k2, v2)| v1.peer_info.chain_tip.accumulated_data().accumulated_sha3x_difficulty.as_u128().cmp(
-                &v2.peer_info.chain_tip.accumulated_data().accumulated_sha3x_difficulty.as_u128(),
+            .max_by(|(_k1, v1), (_k2, v2)| v1.peer_info.chain_difficulty.cmp(
+                &v2.peer_info.chain_difficulty,
             ))
         {
             // save result
-            if let Ok(mut strongest_chain_opt) = self.tip_of_block_height.write() {
+            if let Ok(mut strongest_chain_opt) = self.strongest_chain.write() {
                 if strongest_chain_opt.is_none() {
-                    let _ = strongest_chain_opt.insert(PeerStoreStrongestChain::new(*k, v.peer_info.chain_tip));
+                    let _ = strongest_chain_opt.insert(PeerStoreStrongestChain::new(*k, v.peer_info.chain_difficulty));
                 } else {
                     let strongest_chain = strongest_chain_opt.as_mut().unwrap();
                     strongest_chain.peer_id = *k;
-                    strongest_chain.block = v.peer_info.chain_tip;
+                    strongest_chain.chain_difficulty = v.peer_info.chain_difficulty;
                 }
             }
         }
@@ -117,7 +118,7 @@ impl PeerStore {
 
     /// Returns peer with the strongest share chain.
     pub async fn strongest_chain(&self) -> Option<PeerStoreStrongestChain> {
-        if let Ok(result) = self.tip_of_block_height.read() {
+        if let Ok(result) = self.strongest_chain.read() {
             if result.is_some() {
                 return Some(result.as_ref().unwrap().clone());
             }

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 use tari_common_types::tari_address::TariAddressError;
+use tari_core::proof_of_work::DifficultyError;
 use thiserror::Error;
 
 use crate::sharechain::block::Block;
@@ -16,6 +17,8 @@ pub enum Error {
     TariAddress(#[from] TariAddressError),
     #[error("Invalid block: {0:?}")]
     InvalidBlock(Block),
+    #[error("Block difficulty error: {0:?}")]
+    BlockDifficultyError(#[from] DifficultyError),
 }
 
 #[derive(Error, Debug)]

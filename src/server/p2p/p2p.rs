@@ -7,6 +7,8 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use std::ops::Deref;
+use std::time::Instant;
 
 use libp2p::{
     futures::StreamExt,
@@ -28,6 +30,7 @@ use libp2p::{
     tcp,
     yamux,
 };
+use libp2p::swarm::behaviour::toggle::Toggle;
 use log::{debug, error, info, warn};
 use tari_common::configuration::Network;
 use tari_utilities::hex::Hex;
@@ -38,6 +41,7 @@ use tokio::{
     select,
     sync::{broadcast, broadcast::error::RecvError, mpsc},
 };
+use tokio::sync::Mutex;
 
 use crate::{
     server::{
@@ -61,6 +65,7 @@ use crate::{
     },
     sharechain::{block::Block, ShareChain},
 };
+use crate::sharechain::ShareChainResult;
 
 const PEER_INFO_TOPIC: &str = "peer_info";
 const BLOCK_VALIDATION_REQUESTS_TOPIC: &str = "block_validation_requests";
@@ -77,6 +82,7 @@ pub struct Config {
     pub peer_info_publish_interval: Duration,
     pub stable_peer: bool,
     pub private_key_folder: PathBuf,
+    pub mdns_enabled: bool,
 }
 
 impl Default for Config {
@@ -87,13 +93,14 @@ impl Default for Config {
             peer_info_publish_interval: Duration::from_secs(5),
             stable_peer: false,
             private_key_folder: PathBuf::from("."),
+            mdns_enabled: true,
         }
     }
 }
 
 #[derive(NetworkBehaviour)]
 pub struct ServerNetworkBehaviour {
-    pub mdns: mdns::Behaviour<Tokio>,
+    pub mdns: Toggle<mdns::Behaviour<Tokio>>,
     pub gossipsub: gossipsub::Behaviour,
     pub share_chain_sync: cbor::Behaviour<ShareChainSyncRequest, ShareChainSyncResponse>,
     pub kademlia: kad::Behaviour<MemoryStore>,
@@ -109,6 +116,7 @@ pub struct Service<S>
     share_chain: Arc<S>,
     peer_store: Arc<PeerStore>,
     config: Config,
+    global_sync_share_chain_mutex: Mutex<()>,
 
     // service client related channels
     // TODO: consider mpsc channels instead of broadcast to not miss any message (might drop)
@@ -148,6 +156,7 @@ impl<S> Service<S>
             client_broadcast_block_rx: broadcast_block_rx,
             client_peer_changes_tx: peer_changes_tx,
             client_peer_changes_rx: peer_changes_rx,
+            global_sync_share_chain_mutex: Mutex::new(()),
         })
     }
 
@@ -216,10 +225,20 @@ impl<S> Service<S>
                     gossipsub_config,
                 )?;
 
+                let mdns_service = if config.p2p_service.mdns_enabled {
+                    Toggle::from(
+                        Some(
+                            mdns::Behaviour::new(mdns::Config::default(), key_pair.public().to_peer_id())
+                                .map_err(|e| Error::LibP2P(LibP2PError::IO(e)))?
+                        )
+                    )
+                } else {
+                    Toggle::from(None)
+                };
+
                 Ok(ServerNetworkBehaviour {
                     gossipsub,
-                    mdns: mdns::Behaviour::new(mdns::Config::default(), key_pair.public().to_peer_id())
-                        .map_err(|e| Error::LibP2P(LibP2PError::IO(e)))?,
+                    mdns: mdns_service,
                     share_chain_sync: cbor::Behaviour::<ShareChainSyncRequest, ShareChainSyncResponse>::new(
                         [(
                             StreamProtocol::new(SHARE_CHAIN_SYNC_REQ_RESP_PROTOCOL),
@@ -310,7 +329,7 @@ impl<S> Service<S>
         // get peer info
         let share_chain = self.share_chain.clone();
         let last_block = share_chain.last_block().await?;
-        let peer_info_raw: Vec<u8> = PeerInfo::new(last_block).try_into()?;
+        let peer_info_raw: Vec<u8> = PeerInfo::new(last_block.accumulated_data().accumulated_sha3x_difficulty).try_into()?;
 
         // broadcast peer info
         self.swarm
@@ -326,6 +345,7 @@ impl<S> Service<S>
     async fn broadcast_block(&mut self, result: Result<Block, RecvError>) {
         match result {
             Ok(block) => {
+                let _ = self.global_sync_share_chain_mutex.lock().await;
                 let block_raw_result: Result<Vec<u8>, Error> = block.try_into();
                 match block_raw_result {
                     Ok(block_raw) => {
@@ -391,14 +411,7 @@ impl<S> Service<S>
                 Ok(payload) => {
                     debug!(target: LOG_TARGET, "New peer info: {peer:?} -> {payload:?}");
                     self.peer_store.add(peer, payload).await;
-                    if let Some(tip) = self.peer_store.strongest_chain().await {
-                        if let Ok(last_block) = self.share_chain.last_block().await {
-                            if last_block.accumulated_data().accumulated_sha3x_difficulty.as_u128() <
-                                tip.block.accumulated_data().accumulated_sha3x_difficulty.as_u128() {
-                                self.sync_share_chain().await;
-                            }
-                        }
-                    }
+                    self.sync_share_chain(None).await;
                 }
                 Err(error) => {
                     error!(target: LOG_TARGET, "Can't deserialize peer info payload: {:?}", error);
@@ -408,6 +421,7 @@ impl<S> Service<S>
                 match messages::ValidateBlockRequest::try_from(message) {
                     Ok(payload) => {
                         debug!(target: LOG_TARGET, "Block validation request: {payload:?}");
+                        let _ = self.global_sync_share_chain_mutex.lock().await;
 
                         let validate_result = self.share_chain.validate_block(&payload.block()).await;
                         let mut valid = false;
@@ -435,6 +449,7 @@ impl<S> Service<S>
             topic if topic == Self::topic_name(BLOCK_VALIDATION_RESULTS_TOPIC) => {
                 match messages::ValidateBlockResult::try_from(message) {
                     Ok(payload) => {
+                        let _ = self.global_sync_share_chain_mutex.lock().await;
                         let mut senders_to_delete = vec![];
                         for (i, sender) in self.client_validate_block_res_txs.iter().enumerate() {
                             if let Err(error) = sender.send(payload.clone()) {
@@ -454,9 +469,11 @@ impl<S> Service<S>
             // TODO: send a signature that proves that the actual block was coming from this peer
             topic if topic == Self::topic_name(NEW_BLOCK_TOPIC) => match Block::try_from(message) {
                 Ok(payload) => {
+                    let _ = self.global_sync_share_chain_mutex.lock().await;
                     info!(target: LOG_TARGET,"🆕 New block from broadcast: {:?}", &payload.hash().to_hex());
-                    if let Err(error) = self.share_chain.submit_block(&payload).await {
+                    if let Err(error) = self.share_chain.submit_block(&payload, 0).await { // TODO: network difficulty should be get somehow
                         error!(target: LOG_TARGET, "Could not add new block to local share chain: {error:?}");
+                        self.sync_share_chain(None).await;
                     }
                 }
                 Err(error) => {
@@ -476,13 +493,14 @@ impl<S> Service<S>
         request: ShareChainSyncRequest,
     ) {
         debug!(target: LOG_TARGET, "Incoming Share chain sync request: {request:?}");
-        match self.share_chain.blocks(request.from_height).await {
+        let _ = self.global_sync_share_chain_mutex.lock().await;
+        match self.share_chain.blocks().await {
             Ok(blocks) => {
                 if self
                     .swarm
                     .behaviour_mut()
                     .share_chain_sync
-                    .send_response(channel, ShareChainSyncResponse::new(blocks.clone()))
+                    .send_response(channel, ShareChainSyncResponse::new(blocks))
                     .is_err()
                 {
                     error!(target: LOG_TARGET, "Failed to send block sync response");
@@ -495,36 +513,49 @@ impl<S> Service<S>
     /// Handle share chain sync response.
     /// All the responding blocks will be tried to put into local share chain.
     async fn handle_share_chain_sync_response(&mut self, response: ShareChainSyncResponse) {
+        let _ = self.global_sync_share_chain_mutex.lock().await;
+        if response.blocks.is_empty() {
+            warn!("No blocks returned from share chain sync response!");
+            return;
+        }
         debug!(target: LOG_TARGET, "Share chain sync response: {response:?}");
         if let Err(error) = self.share_chain.submit_blocks(response.blocks, true).await {
             error!(target: LOG_TARGET, "Failed to add synced blocks to share chain: {error:?}");
-            self.sync_share_chain().await;
         }
     }
 
-    // TODO: fix to call it to have the same chain initially
     /// Trigger share chai sync with another peer with the highest known block height.
-    async fn sync_share_chain(&mut self) {
+    async fn sync_share_chain(&mut self, timeout: Option<Duration>) {
+        let _ = self.global_sync_share_chain_mutex.lock().await;
         debug!(target: LOG_TARGET, "Syncing share chain...");
-        while self.peer_store.strongest_chain().await.is_none() {} // waiting for the strongest blockchain
+        let start = Instant::now();
+        while self.peer_store.strongest_chain().await.is_none() {
+            if let Some(timeout) = timeout {
+                if Instant::now().duration_since(start).gt(&timeout) {
+                    break;
+                }
+            }
+        } // waiting for the strongest blockchain
         match self.peer_store.strongest_chain().await {
             Some(result) => {
-                debug!(target: LOG_TARGET, "Found highest block height: {result:?}");
                 match self.share_chain.last_block().await {
                     Ok(last_block) => {
-                        debug!(target: LOG_TARGET, "Send share chain sync request: {result:?}");
-                        self.swarm
-                            .behaviour_mut()
-                            .share_chain_sync
-                            .send_request(&result.peer_id, ShareChainSyncRequest::new(last_block.height()));
+                        // TODO: use target difficulty
+                        if result.chain_difficulty > last_block.accumulated_data().accumulated_sha3x_difficulty {
+                            info!(target: LOG_TARGET, "Found strongest share chain: {:?}", result.chain_difficulty);
+                            self.swarm
+                                .behaviour_mut()
+                                .share_chain_sync
+                                .send_request(&result.peer_id, ShareChainSyncRequest::new());
+                        }
                     }
                     Err(error) => {
-                        error!(target: LOG_TARGET, "Failed to get latest height of share chain: {error:?}")
+                        error!(target: LOG_TARGET, "Failed to get last block of share chain: {error:?}");
                     }
                 }
             }
             None => {
-                error!(target: LOG_TARGET, "Failed to get peer with highest share chain height!")
+                error!(target: LOG_TARGET, "Failed to get peer with strongest share chain!");
             }
         }
     }
@@ -695,7 +726,6 @@ impl<S> Service<S>
 
         self.join_seed_peers()?;
         self.subscribe_to_topics();
-
         self.main_loop().await
     }
 }

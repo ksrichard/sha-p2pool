@@ -6,14 +6,14 @@ use std::sync::Arc;
 use log::{debug, info, warn};
 use minotari_app_grpc::tari_rpc::{
     base_node_client::BaseNodeClient,
-    pow_algo::PowAlgos,
-    sha_p2_pool_server::ShaP2Pool,
     GetNewBlockRequest,
     GetNewBlockResponse,
     GetNewBlockTemplateWithCoinbasesRequest,
     HeightRequest,
     NewBlockTemplateRequest,
+    pow_algo::PowAlgos,
     PowAlgo,
+    sha_p2_pool_server::ShaP2Pool,
     SubmitBlockRequest,
     SubmitBlockResponse,
 };
@@ -26,14 +26,14 @@ use crate::{
         grpc::{error::Error, util},
         p2p,
     },
-    sharechain::{block::Block, ShareChain, SHARE_COUNT},
+    sharechain::{block::Block, SHARE_COUNT, ShareChain},
 };
 
 const LOG_TARGET: &str = "p2pool_grpc";
 
 /// P2Pool specific gRPC service to provide `get_new_block` and `submit_block` functionalities.
 pub struct ShaP2PoolGrpc<S>
-where S: ShareChain + Send + Sync + 'static
+    where S: ShareChain + Send + Sync + 'static
 {
     /// Base node client
     client: Arc<Mutex<BaseNodeClient<tonic::transport::Channel>>>,
@@ -44,7 +44,7 @@ where S: ShareChain + Send + Sync + 'static
 }
 
 impl<S> ShaP2PoolGrpc<S>
-where S: ShareChain + Send + Sync + 'static
+    where S: ShareChain + Send + Sync + 'static
 {
     pub async fn new(
         base_node_address: String,
@@ -59,8 +59,8 @@ where S: ShareChain + Send + Sync + 'static
     }
 
     /// Submits a new block to share chain and broadcasts to the p2p network.
-    pub async fn submit_share_chain_block(&self, block: &Block) -> Result<(), Status> {
-        if let Err(error) = self.share_chain.submit_block(block).await {
+    pub async fn submit_share_chain_block(&self, block: &Block, network_difficulty: u64) -> Result<(), Status> {
+        if let Err(error) = self.share_chain.submit_block(block, network_difficulty).await {
             warn!(target: LOG_TARGET, "Failed to add new block: {error:?}");
         }
         debug!(target: LOG_TARGET, "Broadcast new block with height: {:?}", block.height());
@@ -73,7 +73,7 @@ where S: ShareChain + Send + Sync + 'static
 
 #[tonic::async_trait]
 impl<S> ShaP2Pool for ShaP2PoolGrpc<S>
-where S: ShareChain + Send + Sync + 'static
+    where S: ShareChain + Send + Sync + 'static
 {
     /// Returns a new block (that can be mined) which contains all the shares generated
     /// from the current share chain as coinbase transactions.
@@ -172,17 +172,19 @@ where S: ShareChain + Send + Sync + 'static
             .await?
             .into_inner();
         let mut network_difficulty_matches = false;
+        let mut network_difficulty = 0u64;
         while let Ok(Some(diff_resp)) = network_difficulty_stream.message().await {
-            if origin_block_header.height == diff_resp.height + 1 &&
-                request_block_difficulty.as_u64() > diff_resp.difficulty
-            {
-                network_difficulty_matches = true;
+            if origin_block_header.height == diff_resp.height + 1 {
+                network_difficulty = diff_resp.difficulty;
+                if request_block_difficulty.as_u64() > diff_resp.difficulty {
+                    network_difficulty_matches = true;
+                }
             }
         }
 
         if !network_difficulty_matches {
             block.set_sent_to_main_chain(false);
-            self.submit_share_chain_block(&block).await?;
+            self.submit_share_chain_block(&block, network_difficulty).await?;
             return Ok(Response::new(SubmitBlockResponse {
                 block_hash: block.hash().to_vec(),
             }));
@@ -195,16 +197,16 @@ where S: ShareChain + Send + Sync + 'static
             Ok(resp) => {
                 info!("💰 New matching block found and sent to network!");
                 block.set_sent_to_main_chain(true);
-                self.submit_share_chain_block(&block).await?;
+                self.submit_share_chain_block(&block, network_difficulty).await?;
                 Ok(resp)
-            },
+            }
             Err(_) => {
                 block.set_sent_to_main_chain(false);
-                self.submit_share_chain_block(&block).await?;
+                self.submit_share_chain_block(&block, network_difficulty).await?;
                 Ok(Response::new(SubmitBlockResponse {
                     block_hash: block.hash().to_vec(),
                 }))
-            },
+            }
         }
     }
 }
