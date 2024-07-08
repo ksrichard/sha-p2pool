@@ -9,7 +9,6 @@ use tari_core::{
     blocks::{BlockHeader, BlocksHashDomain},
     consensus::DomainSeparatedConsensusHasher,
 };
-use tari_core::blocks::BlockHeaderAccumulatedData;
 use tari_utilities::epoch_time::EpochTime;
 
 use crate::impl_conversions;
@@ -23,7 +22,7 @@ pub struct Block {
     original_block_header: Option<BlockHeader>,
     miner_wallet_address: Option<TariAddress>,
     sent_to_main_chain: bool,
-    accumulated_data: BlockHeaderAccumulatedData,
+    target_difficulty: u64,
     uncles: Vec<Block>,
 }
 impl_conversions!(Block);
@@ -32,8 +31,8 @@ impl_conversions!(Block);
 
 #[allow(dead_code)]
 impl Block {
-    pub fn builder(accumulated_data: BlockHeaderAccumulatedData) -> BlockBuilder {
-        BlockBuilder::new(accumulated_data)
+    pub fn builder(target_difficulty: u64) -> BlockBuilder {
+        BlockBuilder::new(target_difficulty)
     }
 
     pub fn generate_hash(&self) -> BlockHash {
@@ -132,11 +131,13 @@ impl Block {
         })
             .collect()
     }
-    pub fn accumulated_data(&self) -> &BlockHeaderAccumulatedData {
-        &self.accumulated_data
-    }
+
     pub fn set_height(&mut self, height: u64) {
         self.height = height;
+    }
+    
+    pub fn target_difficulty(&self) -> u64 {
+        self.target_difficulty
     }
 }
 
@@ -145,7 +146,7 @@ pub struct BlockBuilder {
 }
 
 impl BlockBuilder {
-    pub fn new(accumulated_data: BlockHeaderAccumulatedData) -> Self {
+    pub fn new(target_difficulty: u64) -> Self {
         Self {
             block: Block {
                 hash: Default::default(),
@@ -155,7 +156,7 @@ impl BlockBuilder {
                 original_block_header: None,
                 miner_wallet_address: None,
                 sent_to_main_chain: false,
-                accumulated_data,
+                target_difficulty,
                 uncles: vec![],
             },
         }

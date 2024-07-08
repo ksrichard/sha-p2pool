@@ -30,9 +30,7 @@ pub struct InMemoryShareChain {
 }
 
 fn genesis_block() -> Block {
-    Block::builder(BlockHeaderAccumulatedData {
-        ..Default::default()
-    }).build()
+    Block::builder(1).build()
 }
 
 impl Default for InMemoryShareChain {
@@ -76,8 +74,18 @@ impl InMemoryShareChain {
         result
     }
 
-    async fn validate_block(&self, blocks: &mut RwLockWriteGuard<'_, Vec<Block>>, block: &Block, network_difficulty: Option<u64>) -> ShareChainResult<bool> {
-        let last_block = blocks.last().ok_or_else(|| Error::Empty)?.clone();
+    async fn validate_block(&self,
+                            blocks: &mut RwLockWriteGuard<'_, Vec<Block>>,
+                            block: &Block,
+                            network_difficulty: Option<u64>,
+                            sync: bool,
+    ) -> ShareChainResult<bool> {
+        let last_block = blocks.last();
+        // when we sync, the chain is empty, so accept first block immediately
+        if last_block.is_none() && sync {
+            return Ok(true);
+        }
+        let last_block = last_block.ok_or_else(|| Error::Empty)?;
 
         // validate hash
         if block.hash() != block.generate_hash() {
@@ -86,7 +94,7 @@ impl InMemoryShareChain {
         }
 
         // check if we have this block as last
-        if &last_block == block || last_block.hash() == block.hash() {
+        if last_block == block || last_block.hash() == block.hash() {
             warn!(target: LOG_TARGET, "↩️ This block already added, skip");
             return Ok(false);
         }
@@ -111,8 +119,7 @@ impl InMemoryShareChain {
 
                 // validate against current network difficulty
                 if let Some(network_difficulty) = network_difficulty {
-                    let curr_network_difficulty = network_difficulty / SHARE_COUNT;
-                    if new_block_difficulty.as_u64() < curr_network_difficulty {
+                    if new_block_difficulty.as_u64() < network_difficulty {
                         error!(target: LOG_TARGET, "Invalid block, Difficulty mismatch!");
                         return Ok(false);
                     }
@@ -135,26 +142,12 @@ impl InMemoryShareChain {
         Ok(true)
     }
 
-    // TODO: handle issue when synchronizing and got back empty error
-    // TODO: like the following: 
-    // [2024-07-05T12:50:50Z INFO  in_memory_share_chain] 🆕 New block added: "1d0f9e0bdd34e24d6cbbc911046e13683aff1efad6f0581f30608439e63aaca7"
-    // [2024-07-05T12:50:50Z INFO  in_memory_share_chain] ⬆️  Current height: 1
-    // [2024-07-05T12:50:52Z INFO  p2p_service] Found strongest share chain: AccumulatedDifficulty(10805457)
-    // [2024-07-05T12:50:52Z ERROR p2p_service] Failed to add synced blocks to share chain: Empty
-    // [2024-07-05T12:50:53Z INFO  p2p_service] Peer count: 1
-    // [2024-07-05T12:50:53Z ERROR p2p_service] Failed to publish node info: ShareChain(Empty)
-    // [2024-07-05T12:50:57Z ERROR p2p_service] Failed to get last block of share chain: Empty
-    // [2024-07-05T12:50:58Z INFO  p2p_service] Peer count: 1
-    // [2024-07-05T12:50:58Z ERROR p2p_service] Failed to publish node info: ShareChain(Empty)
-    // [2024-07-05T12:50:58Z ERROR p2p_service] Failed to get last block of share chain: Empty
-    // [2024-07-05T12:50:58Z ERROR p2p_service] Failed to get last block of share chain: Empty
-    // [2024-07-05T12:50:58Z INFO  p2p_service] 🆕 New block from broadcast: "2169f8142fad6b4b74f710cd46b620141c6bf2c48caaabed79277bebc3d4670d"
-    // [2024-07-05T12:50:58Z ERROR p2p_service] Could not add new block to local share chain: Empty
     async fn submit_block_with_lock(
         &self,
         blocks: &mut RwLockWriteGuard<'_, Vec<Block>>,
         block: &Block,
         network_difficulty: Option<u64>,
+        sync: bool,
     ) -> ShareChainResult<()> {
         let mut block = block.clone();
 
@@ -166,7 +159,7 @@ impl InMemoryShareChain {
         }
 
         // validate
-        if !self.validate_block(blocks, &block, network_difficulty).await? {
+        if !self.validate_block(blocks, &block, network_difficulty, sync).await? {
             return Err(Error::InvalidBlock(block.clone()));
         }
 
@@ -189,7 +182,7 @@ impl InMemoryShareChain {
 impl ShareChain for InMemoryShareChain {
     async fn submit_block(&self, block: &Block, network_difficulty: u64) -> ShareChainResult<()> {
         let mut blocks_write_lock = self.blocks.write().await;
-        self.submit_block_with_lock(&mut blocks_write_lock, block, Some(network_difficulty)).await
+        self.submit_block_with_lock(&mut blocks_write_lock, block, Some(network_difficulty), false).await
     }
 
     async fn submit_blocks(&self, blocks: Vec<Block>, sync: bool) -> ShareChainResult<()> {
@@ -200,7 +193,7 @@ impl ShareChain for InMemoryShareChain {
         }
 
         for block in blocks {
-            self.submit_block_with_lock(&mut blocks_write_lock, &block, None)
+            self.submit_block_with_lock(&mut blocks_write_lock, &block, None, sync)
                 .await?;
         }
 
@@ -254,22 +247,7 @@ impl ShareChain for InMemoryShareChain {
         let blocks_read_lock = self.blocks.read().await;
         let last_block = blocks_read_lock.last().ok_or_else(|| Error::Empty)?;
 
-        // generate accumulated data
-        // TODO: use target difficulty
-        let origin_block_header_copy = origin_block_header.clone();
-        let achieved_difficulty = sha3x_difficulty(&origin_block_header_copy).unwrap();
-        let target_difficulty = achieved_difficulty;
-        let acc_data = BlockHeaderAccumulatedData::builder(last_block.accumulated_data())
-            .with_hash(HashOutput::from(origin_block_header_copy.hash()))
-            .with_achieved_target_difficulty(AchievedTargetDifficulty::try_construct(
-                origin_block_header_copy.pow_algo(),
-                target_difficulty,
-                achieved_difficulty,
-            ).unwrap()) // TODO: handle error
-            .with_total_kernel_offset(origin_block_header_copy.total_kernel_offset)
-            .build().unwrap(); // TODO: handle error
-
-        Ok(Block::builder(acc_data)
+        Ok(Block::builder(request.target_difficulty)
             .with_timestamp(EpochTime::now())
             .with_prev_hash(last_block.generate_hash())
             .with_original_block_header(origin_block_header)
@@ -286,6 +264,6 @@ impl ShareChain for InMemoryShareChain {
 
     async fn validate_block(&self, block: &Block) -> ShareChainResult<bool> {
         let mut blocks_write_lock = self.blocks.write().await;
-        self.validate_block(&mut blocks_write_lock, block, None).await
+        self.validate_block(&mut blocks_write_lock, block, None, false).await
     }
 }

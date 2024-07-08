@@ -130,14 +130,14 @@ impl<S> ShaP2Pool for ShaP2PoolGrpc<S>
         &self,
         request: Request<SubmitBlockRequest>,
     ) -> Result<Response<SubmitBlockResponse>, Status> {
-        let grpc_block = request.get_ref();
-        let grpc_request_payload = grpc_block
+        let grpc_block_request = request.get_ref();
+        let grpc_request_payload = grpc_block_request
             .block
             .clone()
             .ok_or_else(|| Status::internal("missing block in request"))?;
         let mut block = self
             .share_chain
-            .new_block(grpc_block)
+            .new_block(grpc_block_request)
             .await
             .map_err(|error| Status::internal(error.to_string()))?;
 

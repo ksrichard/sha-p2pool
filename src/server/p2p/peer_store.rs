@@ -50,12 +50,13 @@ impl PeerStoreRecord {
 #[derive(Clone, Debug)]
 pub struct PeerStoreStrongestChain {
     pub peer_id: PeerId,
-    pub chain_difficulty: AccumulatedDifficulty,
+    pub chain_difficulty: u64,
+    pub chain_height: u64,
 }
 
 impl PeerStoreStrongestChain {
-    pub fn new(peer_id: PeerId, chain_difficulty: AccumulatedDifficulty) -> Self {
-        Self { peer_id, chain_difficulty }
+    pub fn new(peer_id: PeerId, chain_difficulty: u64, chain_height: u64) -> Self {
+        Self { peer_id, chain_difficulty, chain_height }
     }
 }
 
@@ -85,7 +86,7 @@ impl PeerStore {
     /// If a peer already exists, just replaces it.
     pub async fn add(&self, peer_id: PeerId, peer_info: PeerInfo) {
         self.inner.insert(peer_id, PeerStoreRecord::new(peer_info)).await;
-        self.set_tip_of_chain().await;
+        self.set_strongest_chain().await;
     }
 
     /// Returns count of peers.
@@ -95,22 +96,23 @@ impl PeerStore {
     }
 
     /// Sets the actual highest block height with peer.
-    async fn set_tip_of_chain(&self) {
+    async fn set_strongest_chain(&self) {
         if let Some((k, v)) = self
             .inner
             .iter()
-            .max_by(|(_k1, v1), (_k2, v2)| v1.peer_info.chain_difficulty.cmp(
-                &v2.peer_info.chain_difficulty,
-            ))
+            .max_by(|(_k1, v1), (_k2, v2)| v1.peer_info.chain_difficulty.cmp(&v2.peer_info.chain_difficulty))
+            .iter()
+            .max_by(|(_k1, v1), (_k2, v2)| v1.peer_info.target_height.cmp(&v2.peer_info.target_height))
         {
             // save result
             if let Ok(mut strongest_chain_opt) = self.strongest_chain.write() {
                 if strongest_chain_opt.is_none() {
-                    let _ = strongest_chain_opt.insert(PeerStoreStrongestChain::new(*k, v.peer_info.chain_difficulty));
+                    let _ = strongest_chain_opt.insert(PeerStoreStrongestChain::new(*k.clone(), v.peer_info.chain_difficulty, v.peer_info.target_height));
                 } else {
                     let strongest_chain = strongest_chain_opt.as_mut().unwrap();
-                    strongest_chain.peer_id = *k;
+                    strongest_chain.peer_id = *k.clone();
                     strongest_chain.chain_difficulty = v.peer_info.chain_difficulty;
+                    strongest_chain.chain_height = v.peer_info.target_height;
                 }
             }
         }
@@ -141,7 +143,7 @@ impl PeerStore {
             }
         }
 
-        self.set_tip_of_chain().await;
+        self.set_strongest_chain().await;
 
         expired_peers
     }

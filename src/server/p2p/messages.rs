@@ -5,7 +5,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
-use tari_core::proof_of_work::AccumulatedDifficulty;
 
 use crate::{server::p2p::Error, sharechain::block::Block};
 
@@ -41,15 +40,17 @@ pub fn serialize_message<T>(input: &T) -> Result<Vec<u8>, Error>
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PeerInfo {
-    pub chain_difficulty: AccumulatedDifficulty,
+    pub chain_difficulty: u64,
+    pub target_height: u64,
     timestamp: u128,
 }
 impl_conversions!(PeerInfo);
 impl PeerInfo {
-    pub fn new(chain_difficulty: AccumulatedDifficulty) -> Self {
+    pub fn new(chain_difficulty: u64, target_height: u64) -> Self {
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros();
         Self {
             chain_difficulty,
+            target_height,
             timestamp,
         }
     }
@@ -93,11 +94,15 @@ impl ValidateBlockResult {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ShareChainSyncRequest {}
+pub struct ShareChainSyncRequest {
+    pub peer_id: PeerId,
+}
 
 impl ShareChainSyncRequest {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(peer_id: PeerId) -> Self {
+        Self {
+            peer_id
+        }
     }
 }
 
