@@ -164,6 +164,8 @@ impl<S> ShaP2Pool for ShaP2PoolGrpc<S>
             .block
             .clone()
             .ok_or_else(|| Status::internal("missing block in request"))?;
+
+        // TODO: new share chain block should include hash from first coinbase's coinbase_extra field for validation purposes
         let mut block = self
             .share_chain
             .new_block(grpc_block)
