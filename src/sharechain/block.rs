@@ -5,6 +5,7 @@ use blake2::Blake2b;
 use digest::consts::U32;
 use serde::{Deserialize, Serialize};
 use tari_common_types::{tari_address::TariAddress, types::BlockHash};
+use tari_common_types::types::FixedHash;
 use tari_core::{
     blocks::{BlockHeader, BlocksHashDomain},
     consensus::DomainSeparatedConsensusHasher,
@@ -32,15 +33,19 @@ impl Block {
     }
 
     pub fn generate_hash(&self) -> BlockHash {
-        let mut hasher = DomainSeparatedConsensusHasher::<BlocksHashDomain, Blake2b<U32>>::new("block")
+        DomainSeparatedConsensusHasher::<BlocksHashDomain, Blake2b<U32>>::new("block")
             .chain(&self.prev_hash)
-            .chain(&self.height);
+            .chain(&self.height)
+            .chain(&self.miner_wallet_address.as_ref().map(|address| { address.to_hex() }))
+            .chain(&self.original_block_header).finalize().into()
+    }
 
-        if let Some(miner_wallet_address) = &self.miner_wallet_address {
-            hasher = hasher.chain(&miner_wallet_address.to_hex());
-        }
-
-        hasher.chain(&self.original_block_header).finalize().into()
+    pub fn generate_mining_hash(&self) -> FixedHash {
+        DomainSeparatedConsensusHasher::<BlocksHashDomain, Blake2b<U32>>::new("block")
+            .chain(&self.prev_hash)
+            .chain(&self.height)
+            .chain(&self.miner_wallet_address.as_ref().map(|address| { address.to_hex() }))
+            .finalize().into()
     }
 
     pub fn timestamp(&self) -> EpochTime {

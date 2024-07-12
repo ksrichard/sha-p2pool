@@ -1,16 +1,17 @@
 // Copyright 2024 The Tari Project
 // SPDX-License-Identifier: BSD-3-Clause
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use minotari_app_grpc::tari_rpc::{
-    base_node_client::BaseNodeClient, pow_algo::PowAlgos, sha_p2_pool_server::ShaP2Pool, GetNewBlockRequest,
-    GetNewBlockResponse, GetNewBlockTemplateWithCoinbasesRequest, HeightRequest, NewBlockTemplateRequest, PowAlgo,
+    base_node_client::BaseNodeClient, GetNewBlockRequest, GetNewBlockResponse, GetNewBlockTemplateWithCoinbasesRequest,
+    HeightRequest, NewBlockTemplateRequest, pow_algo::PowAlgos, PowAlgo, sha_p2_pool_server::ShaP2Pool,
     SubmitBlockRequest, SubmitBlockResponse,
 };
 use tari_core::proof_of_work::sha3x_difficulty;
+use tari_utilities::ByteArray;
 use tokio::sync::Mutex;
 use tonic::{Code, Request, Response, Status};
 
@@ -19,15 +20,15 @@ use crate::{
         grpc::{error::Error, util},
         p2p,
     },
-    sharechain::{block::Block, ShareChain, SHARE_COUNT},
+    sharechain::{block::Block, SHARE_COUNT, ShareChain},
 };
 
 const LOG_TARGET: &str = "p2pool::server::grpc::p2pool";
 
 /// P2Pool specific gRPC service to provide `get_new_block` and `submit_block` functionalities.
 pub struct ShaP2PoolGrpc<S>
-where
-    S: ShareChain + Send + Sync + 'static,
+    where
+        S: ShareChain + Send + Sync + 'static,
 {
     /// Base node client
     client: Arc<Mutex<BaseNodeClient<tonic::transport::Channel>>>,
@@ -39,8 +40,8 @@ where
 }
 
 impl<S> ShaP2PoolGrpc<S>
-where
-    S: ShareChain + Send + Sync + 'static,
+    where
+        S: ShareChain + Send + Sync + 'static,
 {
     pub async fn new(
         base_node_address: String,
@@ -75,8 +76,8 @@ where
 
 #[tonic::async_trait]
 impl<S> ShaP2Pool for ShaP2PoolGrpc<S>
-where
-    S: ShareChain + Send + Sync + 'static,
+    where
+        S: ShareChain + Send + Sync + 'static,
 {
     /// Returns a new block (that can be mined) which contains all the shares generated
     /// from the current share chain as coinbase transactions.
@@ -103,7 +104,24 @@ where
         let reward = miner_data.reward;
 
         // request new block template with shares as coinbases
-        let shares = self.share_chain.generate_shares(reward).await;
+        let mut shares = self.share_chain.generate_shares(reward).await;
+
+        // TODO: generate hash from a new future sharechain block and generate merkle tree out of shares and put into the first coinbase UTXO's extra field
+
+        // adding hash to prove later that this block is merge mined with p2pool
+        if !shares.is_empty() {
+            if let Some(last_block) = self.share_chain.blocks(0).await
+                .map_err(|error| { Status::internal(format!("Failed to get share chain blocks: {error:?}")) })?
+                .last() {
+                let future_sharechain_block = Block::builder()
+                    .with_prev_hash(last_block.generate_hash())
+                    .with_height(last_block.height() + 1)
+                    .build();
+                let hash = future_sharechain_block.generate_mining_hash();
+                // TODO: hash should include the generated merkle tree root hash of shares
+                shares.get_mut(0).unwrap().coinbase_extra = hash.to_vec();
+            }
+        }
 
         let response = self
             .client
@@ -195,14 +213,14 @@ where
                 block.set_sent_to_main_chain(true);
                 self.submit_share_chain_block(&block).await?;
                 Ok(resp)
-            },
+            }
             Err(_) => {
                 block.set_sent_to_main_chain(false);
                 self.submit_share_chain_block(&block).await?;
                 Ok(Response::new(SubmitBlockResponse {
                     block_hash: block.hash().to_vec(),
                 }))
-            },
+            }
         }
     }
 }

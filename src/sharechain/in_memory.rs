@@ -1,21 +1,21 @@
 // Copyright 2024 The Tari Project
 // SPDX-License-Identifier: BSD-3-Clause
 
-use std::slice::Iter;
 use std::{collections::HashMap, sync::Arc};
+use std::slice::Iter;
 
 use async_trait::async_trait;
 use log::{debug, info, warn};
 use minotari_app_grpc::tari_rpc::{NewBlockCoinbase, SubmitBlockRequest};
 use tari_common_types::tari_address::TariAddress;
 use tari_core::blocks::BlockHeader;
-use tari_core::proof_of_work::sha3x_difficulty;
+use tari_core::proof_of_work::{Difficulty, DifficultyError, sha3x_difficulty};
 use tari_utilities::{epoch_time::EpochTime, hex::Hex};
 use tokio::sync::{RwLock, RwLockWriteGuard};
 
 use crate::sharechain::{
-    error::{BlockConvertError, Error},
-    Block, ShareChain, ShareChainResult, SubmitBlockResult, ValidateBlockResult, MAX_BLOCKS_COUNT, SHARE_COUNT,
+    Block,
+    error::{BlockConvertError, Error}, MAX_BLOCKS_COUNT, SHARE_COUNT, ShareChain, ShareChainResult, SubmitBlockResult, ValidateBlockResult,
 };
 
 const LOG_TARGET: &str = "p2pool::sharechain::in_memory";
@@ -152,11 +152,31 @@ impl InMemoryShareChain {
                 return Ok(ValidateBlockResult::new(false, true));
             }
 
-            // validate hash
-            if block.hash() != block.generate_hash() {
-                warn!(target: LOG_TARGET, "❌ Invalid block, hashes do not match");
-                return Ok(ValidateBlockResult::new(false, false));
+            // TODO: revisit and continue validation
+            
+            // // validate hash
+            // if block.hash() != block.generate_hash() {
+            //     warn!(target: LOG_TARGET, "❌ Invalid block, hashes do not match");
+            //     return Ok(ValidateBlockResult::new(false, false));
+            // }
+
+            // validate PoW
+            match sha3x_difficulty(block.original_block_header()) {
+                Ok(difficulty) => {
+                    // let last_block_difficulty = sha3x_difficulty(last_block.original_block_header())
+                    //     .map_err(Error::GenerateDifficulty)?;
+                    // if difficulty < last_block_difficulty {
+                    //     warn!(target: LOG_TARGET, "❌ Low difficulty!");
+                    //     return Ok(ValidateBlockResult::new(false, false));
+                    // }
+                }
+                Err(_) => {
+                    warn!(target: LOG_TARGET, "❌ Invalid PoW, can't calculate difficulty!");
+                    return Ok(ValidateBlockResult::new(false, false));
+                }
             }
+
+            // TODO: validate generated hash from original tari block's first coinbase extra 
 
             // TODO: check here for miners
             // TODO: (send merkle tree root hash and generate here, then compare the two from miners list and shares)
