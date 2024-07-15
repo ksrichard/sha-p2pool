@@ -6,17 +6,14 @@ use std::slice::Iter;
 
 use async_trait::async_trait;
 use log::{debug, info, warn};
-use minotari_app_grpc::tari_rpc::{NewBlockCoinbase, SubmitBlockRequest};
+use minotari_app_grpc::tari_rpc::{AggregateBody, NewBlockCoinbase, SubmitBlockRequest};
 use tari_common_types::tari_address::TariAddress;
 use tari_core::blocks::BlockHeader;
 use tari_core::proof_of_work::{Difficulty, DifficultyError, sha3x_difficulty};
 use tari_utilities::{epoch_time::EpochTime, hex::Hex};
 use tokio::sync::{RwLock, RwLockWriteGuard};
 
-use crate::sharechain::{
-    Block,
-    error::{BlockConvertError, Error}, MAX_BLOCKS_COUNT, SHARE_COUNT, ShareChain, ShareChainResult, SubmitBlockResult, ValidateBlockResult,
-};
+use crate::sharechain::{Block, error::{BlockConvertError, Error}, MAX_BLOCKS_COUNT, MINER_REWARD_FIXED_PERCENT, SHARE_COUNT, ShareChain, ShareChainResult, SubmitBlockResult, ValidateBlockResult};
 
 const LOG_TARGET: &str = "p2pool::sharechain::in_memory";
 
@@ -153,7 +150,7 @@ impl InMemoryShareChain {
             }
 
             // TODO: revisit and continue validation
-            
+
             // // validate hash
             // if block.hash() != block.generate_hash() {
             //     warn!(target: LOG_TARGET, "❌ Invalid block, hashes do not match");
@@ -176,7 +173,12 @@ impl InMemoryShareChain {
                 }
             }
 
-            // TODO: validate generated hash from original tari block's first coinbase extra 
+            // TODO: validate generated hash from original tari block's first coinbase extra
+            let hash = block.generate_mining_hash();
+            if hash.to_vec() != *block.proof_hash() {
+                warn!(target: LOG_TARGET, "❌ Invalid proof hash!");
+                return Ok(ValidateBlockResult::new(false, false));
+            }
 
             // TODO: check here for miners
             // TODO: (send merkle tree root hash and generate here, then compare the two from miners list and shares)
@@ -296,9 +298,21 @@ impl ShareChain for InMemoryShareChain {
 
     // TODO: use integers only instead of floats
     #[allow(clippy::cast_possible_truncation)]
-    async fn generate_shares(&self, reward: u64) -> Vec<NewBlockCoinbase> {
-        let mut result = vec![];
+    async fn generate_shares(&self, miner_wallet_address: &TariAddress, reward: u64) -> Vec<NewBlockCoinbase> {
+        let sender_reward = (reward / 100) * MINER_REWARD_FIXED_PERCENT;
+        let reward = reward - sender_reward;
         let miners = self.miners_with_shares().await;
+
+        // adding miner
+        let mut result = vec![
+            NewBlockCoinbase {
+                address: miner_wallet_address.to_base58(),
+                value: sender_reward,
+                stealth_payment: true,
+                revealed_value_proof: true,
+                coinbase_extra: vec![],
+            }
+        ];
 
         // calculate full hash rate and shares
         miners
@@ -331,6 +345,15 @@ impl ShareChain for InMemoryShareChain {
             .ok_or_else(|| BlockConvertError::MissingField("header".to_string()))?;
         let origin_block_header = BlockHeader::try_from(origin_block_header_grpc.clone())
             .map_err(BlockConvertError::GrpcBlockHeaderConvert)?;
+        let origin_block_body = origin_block_grpc.body.as_ref()
+            .ok_or_else(|| BlockConvertError::MissingField("body".to_string()))?;
+
+        // extract proof hash
+        let proof_hash = origin_block_body.outputs.first()
+            .ok_or_else(|| BlockConvertError::MissingField("block body outputs".to_string()))?
+            .features.as_ref()
+            .ok_or_else(|| BlockConvertError::MissingField("block body outputs features".to_string()))?
+            .coinbase_extra.clone();
 
         let block_levels_read_lock = self.block_levels.read().await;
         let chain = self.chain(block_levels_read_lock.iter());
@@ -341,6 +364,7 @@ impl ShareChain for InMemoryShareChain {
             .with_prev_hash(last_block.generate_hash())
             .with_height(last_block.height() + 1)
             .with_original_block_header(origin_block_header)
+            .with_proof_hash(proof_hash)
             .with_miner_wallet_address(
                 TariAddress::from_hex(request.wallet_payment_address.as_str()).map_err(Error::TariAddress)?,
             )

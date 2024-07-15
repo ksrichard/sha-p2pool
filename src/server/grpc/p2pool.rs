@@ -5,11 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use log::{debug, error, info, warn};
-use minotari_app_grpc::tari_rpc::{
-    base_node_client::BaseNodeClient, GetNewBlockRequest, GetNewBlockResponse, GetNewBlockTemplateWithCoinbasesRequest,
-    HeightRequest, NewBlockTemplateRequest, pow_algo::PowAlgos, PowAlgo, sha_p2_pool_server::ShaP2Pool,
-    SubmitBlockRequest, SubmitBlockResponse,
-};
+use minotari_app_grpc::tari_rpc::{AggregateBody, base_node_client::BaseNodeClient, GetNewBlockRequest, GetNewBlockResponse, GetNewBlockTemplateWithCoinbasesRequest, HeightRequest, NewBlockCoinbase, NewBlockTemplateRequest, pow_algo::PowAlgos, PowAlgo, sha_p2_pool_server::ShaP2Pool, SubmitBlockRequest, SubmitBlockResponse};
 use tari_core::proof_of_work::sha3x_difficulty;
 use tari_utilities::ByteArray;
 use tokio::sync::Mutex;
@@ -83,7 +79,7 @@ impl<S> ShaP2Pool for ShaP2PoolGrpc<S>
     /// from the current share chain as coinbase transactions.
     async fn get_new_block(
         &self,
-        _request: Request<GetNewBlockRequest>,
+        request: Request<GetNewBlockRequest>,
     ) -> Result<Response<GetNewBlockResponse>, Status> {
         if self.sync_in_progress.load(Ordering::Relaxed) {
             return Err(Status::new(Code::Unavailable, "Share chain syncing is in progress..."));

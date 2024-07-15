@@ -3,12 +3,19 @@
 
 use async_trait::async_trait;
 use minotari_app_grpc::tari_rpc::{NewBlockCoinbase, SubmitBlockRequest};
+use tari_common_types::tari_address::TariAddress;
 
 use crate::sharechain::{block::Block, error::Error};
 
+/// Maximum number of blocks kept in share chain.
 pub const MAX_BLOCKS_COUNT: usize = 80;
 
+/// Number of shares.
 pub const SHARE_COUNT: u64 = 100;
+
+// TODO: this should come from configuration instead!
+/// The fixed percent of the reward earned by the miner who finds a new block.
+pub const MINER_REWARD_FIXED_PERCENT: u64 = 20;
 
 pub mod block;
 pub mod error;
@@ -51,7 +58,7 @@ pub trait ShareChain {
     async fn tip_height(&self) -> ShareChainResult<u64>;
 
     /// Generate shares based on the previous blocks.
-    async fn generate_shares(&self, reward: u64) -> Vec<NewBlockCoinbase>;
+    async fn generate_shares(&self, miner_wallet_address: &TariAddress, reward: u64) -> Vec<NewBlockCoinbase>;
 
     /// Return a new block that could be added via `submit_block`.
     async fn new_block(&self, request: &SubmitBlockRequest) -> ShareChainResult<Block>;

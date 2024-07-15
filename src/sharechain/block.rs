@@ -21,6 +21,7 @@ pub struct Block {
     prev_hash: BlockHash,
     height: u64,
     original_block_header: BlockHeader,
+    proof_hash: Vec<u8>,
     miner_wallet_address: Option<TariAddress>,
     sent_to_main_chain: bool,
 }
@@ -82,6 +83,9 @@ impl Block {
     pub fn miner_wallet_address(&self) -> &Option<TariAddress> {
         &self.miner_wallet_address
     }
+    pub fn proof_hash(&self) -> &Vec<u8> {
+        &self.proof_hash
+    }
 }
 
 pub struct BlockBuilder {
@@ -99,6 +103,7 @@ impl BlockBuilder {
                 original_block_header: BlockHeader::new(0),
                 miner_wallet_address: Default::default(),
                 sent_to_main_chain: false,
+                proof_hash: vec![],
             },
         }
     }
@@ -125,6 +130,11 @@ impl BlockBuilder {
 
     pub fn with_miner_wallet_address(&mut self, miner_wallet_address: TariAddress) -> &mut Self {
         self.block.miner_wallet_address = Some(miner_wallet_address);
+        self
+    }
+
+    pub fn with_proof_hash(&mut self, proof_hash: Vec<u8>) -> &mut Self {
+        self.block.proof_hash = proof_hash;
         self
     }
 
