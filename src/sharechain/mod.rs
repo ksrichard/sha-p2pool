@@ -4,6 +4,7 @@
 use async_trait::async_trait;
 use minotari_app_grpc::tari_rpc::{NewBlockCoinbase, SubmitBlockRequest};
 use tari_common_types::tari_address::TariAddress;
+use tari_common_types::types::FixedHash;
 
 use crate::sharechain::{block::Block, error::Error};
 
@@ -15,7 +16,7 @@ pub const SHARE_COUNT: u64 = 100;
 
 // TODO: this should come from configuration instead!
 /// The fixed percent of the reward earned by the miner who finds a new block.
-pub const MINER_REWARD_FIXED_PERCENT: u64 = 20;
+pub const MINER_REWARD_SHARE_COUNT: u64 = 10;
 
 pub mod block;
 pub mod error;
@@ -45,6 +46,23 @@ impl ValidateBlockResult {
     }
 }
 
+pub struct GenerateSharesResult {
+    /// Hash generated from shares (coinbases), it can be used to prove that a block contains
+    /// a specific set of shares.
+    pub hash: FixedHash,
+    /// Generated coinbases.
+    pub coinbases: Vec<NewBlockCoinbase>,
+}
+
+impl GenerateSharesResult {
+    pub fn new(hash: FixedHash, coinbases: Vec<NewBlockCoinbase>) -> Self {
+        Self {
+            hash,
+            coinbases,
+        }
+    }
+}
+
 #[async_trait]
 pub trait ShareChain {
     /// Adds a new block if valid to chain.
@@ -58,7 +76,7 @@ pub trait ShareChain {
     async fn tip_height(&self) -> ShareChainResult<u64>;
 
     /// Generate shares based on the previous blocks.
-    async fn generate_shares(&self, miner_wallet_address: &TariAddress, reward: u64) -> Vec<NewBlockCoinbase>;
+    async fn generate_shares(&self, miner_wallet_address: &TariAddress, reward: u64) -> GenerateSharesResult;
 
     /// Return a new block that could be added via `submit_block`.
     async fn new_block(&self, request: &SubmitBlockRequest) -> ShareChainResult<Block>;

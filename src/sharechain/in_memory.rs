@@ -5,15 +5,19 @@ use std::{collections::HashMap, sync::Arc};
 use std::slice::Iter;
 
 use async_trait::async_trait;
+use blake2::Blake2b;
+use digest::consts::U32;
 use log::{debug, info, warn};
 use minotari_app_grpc::tari_rpc::{AggregateBody, NewBlockCoinbase, SubmitBlockRequest};
 use tari_common_types::tari_address::TariAddress;
-use tari_core::blocks::BlockHeader;
+use tari_common_types::types::FixedHash;
+use tari_core::blocks::{BlockHeader, BlocksHashDomain};
+use tari_core::consensus::DomainSeparatedConsensusHasher;
 use tari_core::proof_of_work::{Difficulty, DifficultyError, sha3x_difficulty};
 use tari_utilities::{epoch_time::EpochTime, hex::Hex};
 use tokio::sync::{RwLock, RwLockWriteGuard};
 
-use crate::sharechain::{Block, error::{BlockConvertError, Error}, MAX_BLOCKS_COUNT, MINER_REWARD_FIXED_PERCENT, SHARE_COUNT, ShareChain, ShareChainResult, SubmitBlockResult, ValidateBlockResult};
+use crate::sharechain::{Block, error::{BlockConvertError, Error}, GenerateSharesResult, MAX_BLOCKS_COUNT, MINER_REWARD_SHARE_COUNT, SHARE_COUNT, ShareChain, ShareChainResult, SubmitBlockResult, ValidateBlockResult};
 
 const LOG_TARGET: &str = "p2pool::sharechain::in_memory";
 
@@ -109,19 +113,17 @@ impl InMemoryShareChain {
         result
     }
 
-    // TODO: use integers instead of floats
     /// Generating number of shares for all the miners.
-    async fn miners_with_shares(&self) -> HashMap<String, f64> {
-        let mut result: HashMap<String, f64> = HashMap::new(); // target wallet address -> number of shares
-        let block_levels = self.block_levels.read().await;
-        let chain = self.chain(block_levels.iter());
+    async fn miners_with_shares(&self, block_level_iter: Iter<'_, BlockLevel>) -> HashMap<String, u64> {
+        let mut result: HashMap<String, u64> = HashMap::new(); // target wallet address -> number of shares
+        let chain = self.chain(block_level_iter);
         chain.iter().for_each(|block| {
             if let Some(miner_wallet_address) = block.miner_wallet_address() {
                 let addr = miner_wallet_address.to_base58();
                 if let Some(curr_hash_rate) = result.get(&addr) {
-                    result.insert(addr, curr_hash_rate + 1.0);
+                    result.insert(addr, curr_hash_rate + 1);
                 } else {
-                    result.insert(addr, 1.0);
+                    result.insert(addr, 1);
                 }
             }
         });
@@ -132,10 +134,28 @@ impl InMemoryShareChain {
     /// Validating a new block.
     async fn validate_block(
         &self,
-        last_block: Option<&Block>,
+        block_level_iter: Iter<'_, BlockLevel>,
         block: &Block,
         sync: bool,
     ) -> ShareChainResult<ValidateBlockResult> {
+        let chain = self.chain(block_level_iter.clone());
+        let mut last_block = chain.last();
+
+        // if the new block's height is lower than or equal to the last block height,
+        // just try to look for the block level where height is previous to the new block
+        if let Some(last_block_found) = chain.last() {
+            if block.height() <= last_block_found.height() {
+                if let Some(found_level) = block_level_iter.clone()
+                    .filter(|level| block.height() != 0 && level.height == block.height() - 1) // TODO: revisit if block.height() != 0 is needed
+                    .last() {
+                    last_block = found_level.blocks.iter()
+                        .filter(|old_block| old_block.generate_hash() == block.prev_hash())
+                        .last()
+                }
+            }
+        }
+
+
         if sync && last_block.is_none() {
             return Ok(ValidateBlockResult::new(true, false));
         }
@@ -160,12 +180,12 @@ impl InMemoryShareChain {
             // validate PoW
             match sha3x_difficulty(block.original_block_header()) {
                 Ok(difficulty) => {
-                    // let last_block_difficulty = sha3x_difficulty(last_block.original_block_header())
-                    //     .map_err(Error::GenerateDifficulty)?;
-                    // if difficulty < last_block_difficulty {
-                    //     warn!(target: LOG_TARGET, "❌ Low difficulty!");
-                    //     return Ok(ValidateBlockResult::new(false, false));
-                    // }
+                    let last_block_difficulty = sha3x_difficulty(last_block.original_block_header())
+                        .map_err(Error::GenerateDifficulty)?;
+                    if difficulty < last_block_difficulty {
+                        warn!(target: LOG_TARGET, "❌ Low difficulty!");
+                        return Ok(ValidateBlockResult::new(false, false));
+                    }
                 }
                 Err(_) => {
                     warn!(target: LOG_TARGET, "❌ Invalid PoW, can't calculate difficulty!");
@@ -174,7 +194,14 @@ impl InMemoryShareChain {
             }
 
             // TODO: validate generated hash from original tari block's first coinbase extra
-            let hash = block.generate_mining_hash();
+            let miners = self.miners_with_shares(block_level_iter).await;
+            let current_share_count = SHARE_COUNT - MINER_REWARD_SHARE_COUNT;
+            let mut miner_shares: Vec<(String, u64)> = miners
+                .iter()
+                .map(|(addr, rate)| (addr.clone(), (current_share_count / 100) * rate))
+                .filter(|(_, share)| *share > 0)
+                .collect();
+            let hash = block.generate_mining_hash(&self.miners_shares_hash(&mut miner_shares));
             if hash.to_vec() != *block.proof_hash() {
                 warn!(target: LOG_TARGET, "❌ Invalid proof hash!");
                 return Ok(ValidateBlockResult::new(false, false));
@@ -200,7 +227,7 @@ impl InMemoryShareChain {
         let last_block = chain.last();
 
         // validate
-        let validate_result = self.validate_block(last_block, block, sync).await?;
+        let validate_result = self.validate_block(block_levels.iter(), block, sync).await?;
         if !validate_result.valid {
             return if validate_result.need_sync {
                 Ok(SubmitBlockResult::new(true))
@@ -242,6 +269,21 @@ impl InMemoryShareChain {
         }
 
         Ok(SubmitBlockResult::new(validate_result.need_sync))
+    }
+
+    fn miners_shares_hash(&self, miner_shares: &mut Vec<(String, u64)>) -> FixedHash {
+        // sorting to make sure we generate the same hash
+        // for the same set of "miner wallet address" -> "share" pairs
+        miner_shares.sort_by(|s1, s2| {
+            s1.1.cmp(&s2.1)
+        });
+
+        let mut hasher = DomainSeparatedConsensusHasher::<BlocksHashDomain, Blake2b<U32>>::new("shares");
+        for (addr, share) in miner_shares {
+            hasher = hasher.chain(addr).chain(share);
+        }
+
+        hasher.finalize().into()
     }
 }
 
@@ -296,15 +338,14 @@ impl ShareChain for InMemoryShareChain {
         Ok(last_block.height())
     }
 
-    // TODO: use integers only instead of floats
-    #[allow(clippy::cast_possible_truncation)]
-    async fn generate_shares(&self, miner_wallet_address: &TariAddress, reward: u64) -> Vec<NewBlockCoinbase> {
-        let sender_reward = (reward / 100) * MINER_REWARD_FIXED_PERCENT;
+    async fn generate_shares(&self, miner_wallet_address: &TariAddress, reward: u64) -> GenerateSharesResult {
+        let sender_reward = (reward / 100) * MINER_REWARD_SHARE_COUNT;
         let reward = reward - sender_reward;
-        let miners = self.miners_with_shares().await;
+        let block_levels_read_lock = self.block_levels.read().await;
+        let miners = self.miners_with_shares(block_levels_read_lock.iter()).await;
 
-        // adding miner
-        let mut result = vec![
+        // calculate full hash rate and shares
+        let mut coinbases = vec![
             NewBlockCoinbase {
                 address: miner_wallet_address.to_base58(),
                 value: sender_reward,
@@ -314,24 +355,30 @@ impl ShareChain for InMemoryShareChain {
             }
         ];
 
-        // calculate full hash rate and shares
-        miners
-            .iter()
-            .map(|(addr, rate)| (addr, rate / SHARE_COUNT as f64))
-            .filter(|(_, share)| *share > 0.0)
-            .for_each(|(addr, share)| {
-                let curr_reward = ((reward as f64) * share) as u64;
-                debug!(target: LOG_TARGET, "{addr} -> SHARE: {share:?}, REWARD: {curr_reward:?}");
-                result.push(NewBlockCoinbase {
-                    address: addr.clone(),
-                    value: curr_reward,
-                    stealth_payment: true,
-                    revealed_value_proof: true,
-                    coinbase_extra: vec![],
-                });
-            });
+        let current_share_count = SHARE_COUNT - MINER_REWARD_SHARE_COUNT;
 
-        result
+        let mut miner_shares: Vec<(String, u64)> = miners
+            .iter()
+            .map(|(addr, rate)| (addr.clone(), (current_share_count / 100) * rate))
+            .filter(|(_, share)| *share > 0)
+            .collect();
+
+        for (addr, share) in &miner_shares {
+            let curr_reward = reward * share;
+            debug!(target: LOG_TARGET, "{addr} -> SHARE: {share:?}, REWARD: {curr_reward:?}");
+            coinbases.push(NewBlockCoinbase {
+                address: addr.clone(),
+                value: curr_reward,
+                stealth_payment: true,
+                revealed_value_proof: true,
+                coinbase_extra: vec![],
+            });
+        }
+
+        GenerateSharesResult::new(
+            self.miners_shares_hash(&mut miner_shares),
+            coinbases,
+        )
     }
 
     async fn new_block(&self, request: &SubmitBlockRequest) -> ShareChainResult<Block> {

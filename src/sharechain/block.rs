@@ -41,11 +41,12 @@ impl Block {
             .chain(&self.original_block_header).finalize().into()
     }
 
-    pub fn generate_mining_hash(&self) -> FixedHash {
-        DomainSeparatedConsensusHasher::<BlocksHashDomain, Blake2b<U32>>::new("block")
+    pub fn generate_mining_hash(&self, shares_hash: &FixedHash) -> FixedHash {
+        DomainSeparatedConsensusHasher::<BlocksHashDomain, Blake2b<U32>>::new("mining")
             .chain(&self.prev_hash)
             .chain(&self.height)
             .chain(&self.miner_wallet_address.as_ref().map(|address| { address.to_hex() }))
+            .chain(shares_hash)
             .finalize().into()
     }
 

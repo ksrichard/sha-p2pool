@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use log::{debug, error, info, warn};
 use minotari_app_grpc::tari_rpc::{AggregateBody, base_node_client::BaseNodeClient, GetNewBlockRequest, GetNewBlockResponse, GetNewBlockTemplateWithCoinbasesRequest, HeightRequest, NewBlockCoinbase, NewBlockTemplateRequest, pow_algo::PowAlgos, PowAlgo, sha_p2_pool_server::ShaP2Pool, SubmitBlockRequest, SubmitBlockResponse};
+use tari_common_types::tari_address::TariAddress;
 use tari_core::proof_of_work::sha3x_difficulty;
 use tari_utilities::ByteArray;
 use tokio::sync::Mutex;
@@ -100,21 +101,22 @@ impl<S> ShaP2Pool for ShaP2PoolGrpc<S>
         let reward = miner_data.reward;
 
         // request new block template with shares as coinbases
-        let mut shares = self.share_chain.generate_shares(reward).await;
-
-        // TODO: generate hash from a new future sharechain block and generate merkle tree out of shares and put into the first coinbase UTXO's extra field
+        let miner_wallet_address = TariAddress::from_hex(request.get_ref().wallet_payment_address.as_str())
+            .map_err(|error| { Status::invalid_argument(format!("Invalid miner wallet address: {error:?}")) })?;
+        let shares_result = self.share_chain.generate_shares(&miner_wallet_address, reward).await;
+        let mut shares = shares_result.coinbases;
 
         // adding hash to prove later that this block is merge mined with p2pool
         if !shares.is_empty() {
-            if let Some(last_block) = self.share_chain.blocks(0).await
-                .map_err(|error| { Status::internal(format!("Failed to get share chain blocks: {error:?}")) })?
-                .last() {
+            let blocks = self.share_chain.blocks(0).await
+                .map_err(|error| { Status::internal(format!("Failed to get share chain blocks: {error:?}")) })?;
+            if let Some(last_block) = blocks.last() {
                 let future_sharechain_block = Block::builder()
                     .with_prev_hash(last_block.generate_hash())
                     .with_height(last_block.height() + 1)
+                    .with_miner_wallet_address(miner_wallet_address)
                     .build();
-                let hash = future_sharechain_block.generate_mining_hash();
-                // TODO: hash should include the generated merkle tree root hash of shares
+                let hash = future_sharechain_block.generate_mining_hash(&shares_result.hash);
                 shares.get_mut(0).unwrap().coinbase_extra = hash.to_vec();
             }
         }
