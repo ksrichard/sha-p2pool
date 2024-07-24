@@ -108,7 +108,7 @@ impl<S> ShaP2Pool for ShaP2PoolGrpc<S>
 
         // adding hash to prove later that this block is merge mined with p2pool
         if !shares.is_empty() {
-            let blocks = self.share_chain.blocks(0).await
+            let blocks = self.share_chain.blocks(-1).await // get all blocks including the first one
                 .map_err(|error| { Status::internal(format!("Failed to get share chain blocks: {error:?}")) })?;
             if let Some(last_block) = blocks.last() {
                 let future_sharechain_block = Block::builder()

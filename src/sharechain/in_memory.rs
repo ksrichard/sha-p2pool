@@ -144,14 +144,25 @@ impl InMemoryShareChain {
         // if the new block's height is lower than or equal to the last block height,
         // just try to look for the block level where height is previous to the new block
         if let Some(last_block_found) = chain.last() {
-            if block.height() <= last_block_found.height() {
-                if let Some(found_level) = block_level_iter.clone()
-                    .filter(|level| block.height() != 0 && level.height == block.height() - 1) // TODO: revisit if block.height() != 0 is needed
-                    .last() {
-                    last_block = found_level.blocks.iter()
+            if block.height() <= last_block_found.height() || block.prev_hash() != last_block_found.generate_hash() {
+                for level in block_level_iter.clone() {
+                    let last_block_found = level.blocks.iter()
                         .filter(|old_block| old_block.generate_hash() == block.prev_hash())
-                        .last()
+                        .last();
+                    if last_block_found.is_some() {
+                        last_block = last_block_found
+                    }
                 }
+                // if let Some(found_level) = block_level_iter.clone()
+                //     .filter(|level|
+                //         block.height() != 0 && (level.height == block.height() - 1) ||
+                //             (level.)
+                //     ) // TODO: revisit if block.height() != 0 is needed
+                //     .last() {
+                //     last_block = found_level.blocks.iter()
+                //         .filter(|old_block| old_block.generate_hash() == block.prev_hash())
+                //         .last()
+                // }
             }
         }
 
@@ -196,6 +207,7 @@ impl InMemoryShareChain {
             // TODO: validate generated hash from original tari block's first coinbase extra
             let miners = self.miners_with_shares(block_level_iter).await;
             let current_share_count = SHARE_COUNT - MINER_REWARD_SHARE_COUNT;
+            // TODO: add self miner
             let mut miner_shares: Vec<(String, u64)> = miners
                 .iter()
                 .map(|(addr, rate)| (addr.clone(), (current_share_count / 100) * rate))
@@ -342,18 +354,21 @@ impl ShareChain for InMemoryShareChain {
         let sender_reward = (reward / 100) * MINER_REWARD_SHARE_COUNT;
         let reward = reward - sender_reward;
         let block_levels_read_lock = self.block_levels.read().await;
-        let miners = self.miners_with_shares(block_levels_read_lock.iter()).await;
+        let mut miners = self.miners_with_shares(block_levels_read_lock.iter()).await;
 
+        // TODO: revisit
         // calculate full hash rate and shares
-        let mut coinbases = vec![
-            NewBlockCoinbase {
-                address: miner_wallet_address.to_base58(),
-                value: sender_reward,
-                stealth_payment: true,
-                revealed_value_proof: true,
-                coinbase_extra: vec![],
-            }
-        ];
+        // miners.insert(miner_wallet_address.to_base58(), MINER_REWARD_SHARE_COUNT);
+        // let mut coinbases = vec![
+        //     NewBlockCoinbase {
+        //         address: miner_wallet_address.to_base58(),
+        //         value: sender_reward,
+        //         stealth_payment: true,
+        //         revealed_value_proof: true,
+        //         coinbase_extra: vec![],
+        //     }
+        // ];
+        let mut coinbases = vec![];
 
         let current_share_count = SHARE_COUNT - MINER_REWARD_SHARE_COUNT;
 
@@ -418,12 +433,12 @@ impl ShareChain for InMemoryShareChain {
             .build())
     }
 
-    async fn blocks(&self, from_height: u64) -> ShareChainResult<Vec<Block>> {
+    async fn blocks(&self, from_height: i64) -> ShareChainResult<Vec<Block>> {
         let block_levels_read_lock = self.block_levels.read().await;
         let chain = self.chain(block_levels_read_lock.iter());
         Ok(chain
             .iter()
-            .filter(|block| block.height() > from_height)
+            .filter(|block| block.height() as i64 > from_height)
             .cloned()
             .collect())
     }

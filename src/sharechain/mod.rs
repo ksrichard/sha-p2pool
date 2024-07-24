@@ -82,5 +82,5 @@ pub trait ShareChain {
     async fn new_block(&self, request: &SubmitBlockRequest) -> ShareChainResult<Block>;
 
     /// Returns blocks from the given height (`from_height`, exclusive).
-    async fn blocks(&self, from_height: u64) -> ShareChainResult<Vec<Block>>;
+    async fn blocks(&self, from_height: i64) -> ShareChainResult<Vec<Block>>;
 }
