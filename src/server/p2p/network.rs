@@ -359,7 +359,7 @@ impl<S> Service<S>
 
                 match Block::try_from(message) {
                     Ok(payload) => {
-                        debug!(target: LOG_TARGET,"🆕 New block from broadcast: {:?}", &payload.hash().to_hex());
+                        info!(target: LOG_TARGET,"🆕 New block from broadcast: {:?}", &payload.hash().to_hex());
                         match self.share_chain.submit_block(&payload).await {
                             Ok(result) => {
                                 if result.need_sync {
@@ -687,7 +687,7 @@ impl<S> Service<S>
                 peer_store,
                 share_chain,
                 share_chain_sync_tx,
-                Duration::from_secs(30),
+                Duration::from_secs(5),
             )
                 .await;
         });

@@ -11,6 +11,7 @@ use tari_core::{
     consensus::DomainSeparatedConsensusHasher,
 };
 use tari_utilities::epoch_time::EpochTime;
+use tari_utilities::hex::Hex;
 
 use crate::impl_conversions;
 
@@ -34,20 +35,29 @@ impl Block {
     }
 
     pub fn generate_hash(&self) -> BlockHash {
-        DomainSeparatedConsensusHasher::<BlocksHashDomain, Blake2b<U32>>::new("block")
-            .chain(&self.prev_hash)
-            .chain(&self.height)
-            .chain(&self.miner_wallet_address.as_ref().map(|address| { address.to_hex() }))
-            .chain(&self.original_block_header).finalize().into()
+        let mut hasher = DomainSeparatedConsensusHasher::<BlocksHashDomain, Blake2b<U32>>::new("block")
+            .chain(&self.prev_hash.to_hex())
+            .chain(&self.height);
+
+        if self.miner_wallet_address.is_some() {
+            hasher = hasher.chain(&self.miner_wallet_address.clone().unwrap().to_base58());
+        }
+
+        // hasher.chain(&self.original_block_header).finalize().into()
+        hasher.finalize().into()
     }
 
     pub fn generate_mining_hash(&self, shares_hash: &FixedHash) -> FixedHash {
-        DomainSeparatedConsensusHasher::<BlocksHashDomain, Blake2b<U32>>::new("mining")
-            .chain(&self.prev_hash)
-            .chain(&self.miner_wallet_address.as_ref().map(|address| { address.to_hex() }))
-            // .chain(&self.height) // TODO: revisit
-            .chain(shares_hash)
-            .finalize().into()
+        let mut hasher = DomainSeparatedConsensusHasher::<BlocksHashDomain, Blake2b<U32>>::new("mining");
+        // .chain(&self.prev_hash.to_hex())
+        // .chain(&self.height);
+
+        if self.miner_wallet_address.is_some() {
+            hasher = hasher.chain(&self.miner_wallet_address.clone().unwrap().to_base58());
+        }
+        // .chain(&self.height) // TODO: revisit
+        // .chain(shares_hash) // TODO: revisit
+        hasher.chain(shares_hash).finalize().into()
     }
 
     pub fn timestamp(&self) -> EpochTime {

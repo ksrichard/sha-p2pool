@@ -9,6 +9,7 @@ use minotari_app_grpc::tari_rpc::{AggregateBody, base_node_client::BaseNodeClien
 use tari_common_types::tari_address::TariAddress;
 use tari_core::proof_of_work::sha3x_difficulty;
 use tari_utilities::ByteArray;
+use tari_utilities::hex::Hex;
 use tokio::sync::Mutex;
 use tonic::{Code, Request, Response, Status};
 
@@ -63,7 +64,7 @@ impl<S> ShaP2PoolGrpc<S>
         if let Err(error) = self.share_chain.submit_block(block).await {
             warn!(target: LOG_TARGET, "Failed to add new block: {error:?}");
         }
-        debug!(target: LOG_TARGET, "Broadcast new block with height: {:?}", block.height());
+        info!(target: LOG_TARGET, "Broadcast new block with height: {:?}", block.height());
         self.p2p_client
             .broadcast_block(block)
             .await
@@ -112,11 +113,23 @@ impl<S> ShaP2Pool for ShaP2PoolGrpc<S>
                 .map_err(|error| { Status::internal(format!("Failed to get share chain blocks: {error:?}")) })?;
             if let Some(last_block) = blocks.last() {
                 let future_sharechain_block = Block::builder()
-                    .with_prev_hash(last_block.generate_hash())
+                    .with_prev_hash(last_block.hash())
                     .with_height(last_block.height() + 1)
-                    .with_miner_wallet_address(miner_wallet_address)
+                    .with_miner_wallet_address(miner_wallet_address.clone())
                     .build();
                 let hash = future_sharechain_block.generate_mining_hash(&shares_result.hash);
+
+                // TODO: remove, only for debugging
+                info!("");
+                info!("----------------------------------");
+                info!("NEW BLOCK: Miner wallet address: {:?}, Prev block hash: {:?}", miner_wallet_address.to_hex(), future_sharechain_block.prev_hash().to_hex());
+                info!("Last block: {:?}", last_block.hash());
+                info!("PROOF HASH: {:?}", hash.to_vec());
+                info!("Height: {:?}", future_sharechain_block.height());
+                info!("----------------------------------");
+                info!("");
+
+
                 shares.get_mut(0).unwrap().coinbase_extra = hash.to_vec();
             }
         }
