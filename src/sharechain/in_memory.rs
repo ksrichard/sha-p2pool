@@ -224,12 +224,12 @@ impl InMemoryShareChain {
             let mut miners = self.miners_with_shares(block_level_iter).await;
             if miners.is_empty() {
                 if let Some(miner_wallet_address) = block.miner_wallet_address() {
-                    miners.insert(miner_wallet_address.to_base58(), 1);
+                    miners.insert(miner_wallet_address.to_base58(), 10);
                 }
             }
             let mut miner_shares: Vec<(String, u64)> = miners
                 .iter()
-                .map(|(addr, rate)| (addr.clone(), (SHARE_COUNT / 100) * rate))
+                .map(|(addr, count)| (addr.clone(), *count))
                 .filter(|(_, share)| *share > 0)
                 .collect();
 
@@ -322,10 +322,21 @@ impl InMemoryShareChain {
             s1.1.cmp(&s2.1)
         });
 
+        info!("");
+        info!("");
+        info!("---------------------------------------");
+        info!("miners_shares_hash");
+        info!("------------------");
+
         let mut hasher = DomainSeparatedConsensusHasher::<BlocksHashDomain, Blake2b<U32>>::new("shares");
         for (addr, share) in miner_shares {
             hasher = hasher.chain(addr).chain(share);
+            info!("{addr:?}, {share:?}");
         }
+
+        info!("---------------------------------------");
+        info!("");
+        info!("");
 
         hasher.finalize().into()
     }
@@ -405,11 +416,11 @@ impl ShareChain for InMemoryShareChain {
         // let current_share_count = SHARE_COUNT - MINER_REWARD_SHARE_COUNT;
 
         if miners.is_empty() {
-            miners.insert(miner_wallet_address.to_base58(), 1);
+            miners.insert(miner_wallet_address.to_base58(), 10);
             coinbases.push(
                 NewBlockCoinbase {
                     address: miner_wallet_address.to_base58(),
-                    value: (SHARE_COUNT / 100) * reward,
+                    value: (reward / SHARE_COUNT) * 10,
                     stealth_payment: true,
                     revealed_value_proof: true,
                     coinbase_extra: vec![],
@@ -419,12 +430,12 @@ impl ShareChain for InMemoryShareChain {
 
         let mut miner_shares: Vec<(String, u64)> = miners
             .iter()
-            .map(|(addr, rate)| (addr.clone(), (SHARE_COUNT / 100) * rate))
+            .map(|(addr, count)| (addr.clone(), *count))
             .filter(|(_, share)| *share > 0)
             .collect();
 
         for (addr, share) in &miner_shares {
-            let curr_reward = reward * share;
+            let curr_reward = (reward / SHARE_COUNT) * share;
             info!(target: LOG_TARGET, "{addr} -> SHARE: {share:?}, REWARD: {curr_reward:?}");
             coinbases.push(NewBlockCoinbase {
                 address: addr.clone(),
