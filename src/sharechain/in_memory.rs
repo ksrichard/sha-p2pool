@@ -14,7 +14,7 @@ use tari_common_types::types::{BlockHash, FixedHash};
 use tari_core::blocks::{BlockHeader, BlocksHashDomain};
 use tari_core::consensus::DomainSeparatedConsensusHasher;
 use tari_core::proof_of_work::{Difficulty, DifficultyError, sha3x_difficulty};
-use tari_utilities::{epoch_time::EpochTime, hex::Hex};
+use tari_utilities::{ByteArray, epoch_time::EpochTime, hex::Hex};
 use tokio::sync::{RwLock, RwLockWriteGuard};
 
 use crate::sharechain::{Block, error::{BlockConvertError, Error}, GenerateSharesResult, MAX_BLOCKS_COUNT, MINER_REWARD_SHARE_COUNT, SHARE_COUNT, ShareChain, ShareChainResult, SubmitBlockResult, ValidateBlockResult};
@@ -138,7 +138,7 @@ impl InMemoryShareChain {
         block: &Block,
         sync: bool,
     ) -> ShareChainResult<ValidateBlockResult> {
-        let chain = self.chain(block_level_iter.clone());
+        // let chain = self.chain(block_level_iter.clone());
         let mut last_block = None;
 
         for level in block_level_iter.clone() {
@@ -221,25 +221,25 @@ impl InMemoryShareChain {
             // TODO: validate generated hash from original tari block's first coinbase extra
             // let current_share_count = SHARE_COUNT - MINER_REWARD_SHARE_COUNT;
             // TODO: add self miner
-            let mut miners = self.miners_with_shares(block_level_iter).await;
-            if miners.is_empty() {
-                if let Some(miner_wallet_address) = block.miner_wallet_address() {
-                    miners.insert(miner_wallet_address.to_base58(), 10);
-                }
-            }
-            let mut miner_shares: Vec<(String, u64)> = miners
-                .iter()
-                .map(|(addr, count)| (addr.clone(), *count))
-                .filter(|(_, share)| *share > 0)
-                .collect();
-
-            // TODO: remove, debugging only
+            // let mut miners = self.miners_with_shares(block_level_iter).await;
+            // if miners.is_empty() {
+            //     if let Some(miner_wallet_address) = block.miner_wallet_address() {
+            //         miners.insert(miner_wallet_address.to_base58(), 10);
+            //     }
+            // }
+            // let mut miner_shares: Vec<(String, u64)> = miners
+            //     .iter()
+            //     .map(|(addr, count)| (addr.clone(), *count))
+            //     .filter(|(_, share)| *share > 0)
+            //     .collect();
+            //
+            // // TODO: remove, debugging only
             info!("");
             info!("----------------------------------");
-            info!("SUBMIT BLOCK VALIDATION: Height: {:?}, Miner wallet address: {:?}, Prev block hash: {:?}", block.height(), block.miner_wallet_address().clone().unwrap().to_hex(), block.prev_hash().to_hex());
+            info!("SUBMIT BLOCK VALIDATION: Height: {:?}, Miner wallet address: {:?}, Prev block hash: {:?}", block.height(), block.miner_wallet_address().clone().unwrap().to_hex(), block.prev_hash().to_vec());
 
-            let hash = block.generate_mining_hash(&self.miners_shares_hash(&mut miner_shares));
-
+            let hash = block.generate_mining_hash();
+            //
             info!("Block hash: {:?} ?= {:?}", block.proof_hash().to_hex(), hash.to_hex());
             info!("[O] PROOF HASH: {:?}", block.proof_hash());
             info!("[G] PROOF HASH: {:?}", hash);
@@ -254,6 +254,7 @@ impl InMemoryShareChain {
             // TODO: check here for miners
             // TODO: (send merkle tree root hash and generate here, then compare the two from miners list and shares)
         } else {
+            warn!("Last block not found! - Hash: {:?}", block.prev_hash());
             return Ok(ValidateBlockResult::new(false, true));
         }
 
@@ -322,21 +323,21 @@ impl InMemoryShareChain {
             s1.1.cmp(&s2.1)
         });
 
-        info!("");
-        info!("");
-        info!("---------------------------------------");
-        info!("miners_shares_hash");
-        info!("------------------");
+        // info!("");
+        // info!("");
+        // info!("---------------------------------------");
+        // info!("miners_shares_hash");
+        // info!("------------------");
 
         let mut hasher = DomainSeparatedConsensusHasher::<BlocksHashDomain, Blake2b<U32>>::new("shares");
         for (addr, share) in miner_shares {
             hasher = hasher.chain(addr).chain(share);
-            info!("{addr:?}, {share:?}");
+            // info!("{addr:?}, {share:?}");
         }
 
-        info!("---------------------------------------");
-        info!("");
-        info!("");
+        // info!("---------------------------------------");
+        // info!("");
+        // info!("");
 
         hasher.finalize().into()
     }
@@ -363,6 +364,7 @@ impl ShareChain for InMemoryShareChain {
             if let Some(last_block) = chain.last() {
                 if last_block.hash() != genesis_block().hash()
                     && usize::try_from(last_block.height()).map_err(Error::FromIntConversion)? < MAX_BLOCKS_COUNT
+                    && !blocks.is_empty()
                     && usize::try_from(blocks[0].height()).map_err(Error::FromIntConversion)? > MAX_BLOCKS_COUNT
                 {
                     block_levels_write_lock.clear();
@@ -415,18 +417,22 @@ impl ShareChain for InMemoryShareChain {
 
         // let current_share_count = SHARE_COUNT - MINER_REWARD_SHARE_COUNT;
 
+        let miner_reward = (reward / SHARE_COUNT) * MINER_REWARD_SHARE_COUNT;
+        let reward = reward - miner_reward;
         if miners.is_empty() {
-            miners.insert(miner_wallet_address.to_base58(), 10);
+            miners.insert(miner_wallet_address.to_base58(), MINER_REWARD_SHARE_COUNT);
             coinbases.push(
                 NewBlockCoinbase {
                     address: miner_wallet_address.to_base58(),
-                    value: (reward / SHARE_COUNT) * 10,
+                    value: miner_reward,
                     stealth_payment: true,
                     revealed_value_proof: true,
                     coinbase_extra: vec![],
                 }
             );
         }
+
+        let current_share_count = SHARE_COUNT - MINER_REWARD_SHARE_COUNT;
 
         let mut miner_shares: Vec<(String, u64)> = miners
             .iter()
@@ -435,8 +441,8 @@ impl ShareChain for InMemoryShareChain {
             .collect();
 
         for (addr, share) in &miner_shares {
-            let curr_reward = (reward / SHARE_COUNT) * share;
-            info!(target: LOG_TARGET, "{addr} -> SHARE: {share:?}, REWARD: {curr_reward:?}");
+            let curr_reward = (reward / current_share_count) * share;
+            // info!(target: LOG_TARGET, "{addr} -> SHARE: {share:?}, REWARD: {curr_reward:?}");
             coinbases.push(NewBlockCoinbase {
                 address: addr.clone(),
                 value: curr_reward,
@@ -467,15 +473,38 @@ impl ShareChain for InMemoryShareChain {
             .ok_or_else(|| BlockConvertError::MissingField("body".to_string()))?;
 
         // extract proof hash
-        let proof_hash = origin_block_body.outputs.first()
+
+        let proof_hash = origin_block_body.outputs.iter().filter(|output| {
+            if let Some(features) = output.features.as_ref() {
+                return !features.coinbase_extra.is_empty();
+            }
+            false
+        })
+            .last()
             .ok_or_else(|| BlockConvertError::MissingField("block body outputs".to_string()))?
             .features.as_ref()
             .ok_or_else(|| BlockConvertError::MissingField("block body outputs features".to_string()))?
             .coinbase_extra.clone();
 
+        info!("[new_block] proof hash extracted: {proof_hash:?}");
+
+
         let block_levels_read_lock = self.block_levels.read().await;
-        let chain = self.chain(block_levels_read_lock.iter());
-        let last_block = chain.last().ok_or_else(|| Error::Empty)?;
+        // let chain = self.chain(block_levels_read_lock.iter());
+        // let last_block = chain.last().ok_or_else(|| Error::Empty)?;
+
+        // finding last block (based on new block's original hash)
+        let mut last_block = None;
+
+        for level in block_levels_read_lock.iter() {
+            let last_block_found = level.blocks.iter()
+                .filter(|old_block| old_block.original_block_header().hash() == origin_block_header.prev_hash)
+                .last();
+            if last_block_found.is_some() {
+                last_block = last_block_found
+            }
+        }
+        let last_block = last_block.ok_or_else(|| Error::Empty)?;
 
         Ok(Block::builder()
             .with_timestamp(EpochTime::now())

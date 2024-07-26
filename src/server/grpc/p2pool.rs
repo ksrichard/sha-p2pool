@@ -108,31 +108,31 @@ impl<S> ShaP2Pool for ShaP2PoolGrpc<S>
         let mut shares = shares_result.coinbases;
 
         // adding hash to prove later that this block is merge mined with p2pool
-        if !shares.is_empty() {
-            let blocks = self.share_chain.blocks(-1).await // get all blocks including the first one
-                .map_err(|error| { Status::internal(format!("Failed to get share chain blocks: {error:?}")) })?;
-            if let Some(last_block) = blocks.last() {
-                let future_sharechain_block = Block::builder()
-                    .with_prev_hash(last_block.hash())
-                    .with_height(last_block.height() + 1)
-                    .with_miner_wallet_address(miner_wallet_address.clone())
-                    .build();
-                let hash = future_sharechain_block.generate_mining_hash(&shares_result.hash);
+        // if !shares.is_empty() {
+        let blocks = self.share_chain.blocks(-1).await // get all blocks including the first one
+            .map_err(|error| { Status::internal(format!("Failed to get share chain blocks: {error:?}")) })?;
+        if let Some(last_block) = blocks.last() {
+            let future_sharechain_block = Block::builder()
+                .with_prev_hash(last_block.hash())
+                .with_height(last_block.height() + 1)
+                .with_miner_wallet_address(miner_wallet_address.clone())
+                .build();
+            let hash = future_sharechain_block.generate_mining_hash();
 
-                // TODO: remove, only for debugging
-                info!("");
-                info!("----------------------------------");
-                info!("NEW BLOCK: Miner wallet address: {:?}, Prev block hash: {:?}", miner_wallet_address.to_hex(), future_sharechain_block.prev_hash().to_hex());
-                info!("Last block: {:?}", last_block.hash());
-                info!("PROOF HASH: {:?}", hash.to_vec());
-                info!("Height: {:?}", future_sharechain_block.height());
-                info!("----------------------------------");
-                info!("");
+            // TODO: remove, only for debugging
+            info!("");
+            info!("----------------------------------");
+            info!("NEW BLOCK REQUEST: Miner wallet address: {:?}, Prev block hash: {:?}", miner_wallet_address.to_hex(), future_sharechain_block.prev_hash().to_vec());
+            info!("Last block: {:?}", last_block.hash());
+            info!("PROOF HASH: {:?}", hash.to_vec());
+            info!("Height: {:?}", future_sharechain_block.height());
+            info!("----------------------------------");
+            info!("");
 
 
-                shares.get_mut(0).unwrap().coinbase_extra = hash.to_vec();
-            }
+            shares.get_mut(0).unwrap().coinbase_extra = hash.to_vec();
         }
+        // }
 
         let response = self
             .client

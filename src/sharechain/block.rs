@@ -3,6 +3,7 @@
 
 use blake2::Blake2b;
 use digest::consts::U32;
+use log::info;
 use serde::{Deserialize, Serialize};
 use tari_common_types::{tari_address::TariAddress, types::BlockHash};
 use tari_common_types::types::FixedHash;
@@ -43,21 +44,21 @@ impl Block {
             hasher = hasher.chain(&self.miner_wallet_address.clone().unwrap().to_base58());
         }
 
-        // hasher.chain(&self.original_block_header).finalize().into()
-        hasher.finalize().into()
+        hasher.chain(&self.original_block_header).finalize().into()
     }
 
-    pub fn generate_mining_hash(&self, shares_hash: &FixedHash) -> FixedHash {
-        let mut hasher = DomainSeparatedConsensusHasher::<BlocksHashDomain, Blake2b<U32>>::new("mining");
-        // .chain(&self.prev_hash.to_hex())
-        // .chain(&self.height);
+    pub fn generate_mining_hash(&self) -> FixedHash {
+        info!("[generate_mining_hash] - {:?} + {:?}", self.height, self.miner_wallet_address.clone().unwrap().to_base58());
+        let mut hasher = DomainSeparatedConsensusHasher::<BlocksHashDomain, Blake2b<U32>>::new("mining")
+            // .chain(&self.prev_hash.to_hex())
+            .chain(&self.height);
 
         if self.miner_wallet_address.is_some() {
             hasher = hasher.chain(&self.miner_wallet_address.clone().unwrap().to_base58());
         }
         // .chain(&self.height) // TODO: revisit
         // .chain(shares_hash) // TODO: revisit
-        hasher.chain(shares_hash).finalize().into()
+        hasher.finalize().into()
     }
 
     pub fn timestamp(&self) -> EpochTime {
