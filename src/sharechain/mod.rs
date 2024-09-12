@@ -5,6 +5,7 @@ use crate::sharechain::{block::Block, error::Error};
 use async_trait::async_trait;
 use minotari_app_grpc::tari_rpc::{NewBlockCoinbase, SubmitBlockRequest};
 use num::BigUint;
+use std::time::Duration;
 use tari_common_types::types::FixedHash;
 use tari_core::consensus::ConsensusManager;
 use tari_core::proof_of_work::randomx_factory::RandomXFactory;
@@ -19,8 +20,15 @@ pub const MAX_BLOCKS_COUNT: usize = 600;
 /// How many blocks are used to calculate current shares to be paid out.
 pub const BLOCKS_WINDOW: usize = 400;
 
+/// Number of shares in block window.
 pub const SHARE_COUNT: u64 = 200;
+
+/// Maximum number of shares a miner can earn in block window.
 pub const MAX_SHARES_PER_MINER: u64 = 60;
+
+/// The expiration time while blocks are considered valid in share chains.
+// pub const BLOCKS_EXPIRATION: Duration = Duration::from_secs(60 * 60 * 24); // 1 day
+pub const BLOCKS_EXPIRATION: Duration = Duration::from_secs(60 * 60 * 2); // 2 hours
 
 pub mod block;
 pub mod error;
@@ -41,12 +49,13 @@ impl SubmitBlockResult {
 
 pub struct ValidateBlockResult {
     pub valid: bool,
+    pub skipped: bool,
     pub need_sync: bool,
 }
 
 impl ValidateBlockResult {
-    pub fn new(valid: bool, need_sync: bool) -> Self {
-        Self { valid, need_sync }
+    pub fn new(valid: bool, skipped: bool, need_sync: bool) -> Self {
+        Self { valid, skipped, need_sync }
     }
 }
 

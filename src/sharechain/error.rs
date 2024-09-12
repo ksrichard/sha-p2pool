@@ -4,13 +4,11 @@
 use std::num::TryFromIntError;
 
 use tari_common_types::tari_address::TariAddressError;
-use tari_common_types::types::FixedHashSizeError;
+use tari_common_types::types::{FixedHash, FixedHashSizeError};
 use tari_core::consensus::ConsensusBuilderError;
 use tari_core::proof_of_work::monero_rx::MergeMineError;
 use tari_core::proof_of_work::DifficultyError;
 use thiserror::Error;
-
-use crate::sharechain::block::Block;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -21,7 +19,7 @@ pub enum Error {
     #[error("Tari address error: {0}")]
     TariAddress(#[from] TariAddressError),
     #[error("Invalid block: {0:?}")]
-    InvalidBlock(Block),
+    InvalidBlock(FixedHash),
     #[error("Number conversion error: {0}")]
     FromIntConversion(#[from] TryFromIntError),
     #[error("Number conversion error: {0} to u64")]

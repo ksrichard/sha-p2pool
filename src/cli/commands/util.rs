@@ -1,10 +1,9 @@
 // Copyright 2024 The Tari Project
 // SPDX-License-Identifier: BSD-3-Clause
 
+use libp2p::identity::Keypair;
 use std::env;
 use std::sync::Arc;
-
-use libp2p::identity::Keypair;
 use tari_common::configuration::Network;
 use tari_common::initialize_logging;
 use tari_core::consensus::ConsensusManager;
@@ -17,7 +16,7 @@ use crate::server as main_server;
 use crate::server::p2p::Tribe;
 use crate::server::Server;
 use crate::sharechain::in_memory::InMemoryShareChain;
-use crate::sharechain::{BlockValidationParams, MAX_BLOCKS_COUNT};
+use crate::sharechain::{BlockValidationParams, BLOCKS_EXPIRATION, MAX_BLOCKS_COUNT};
 
 pub async fn server(
     cli: Arc<Cli>,
@@ -86,9 +85,10 @@ pub async fn server(
         consensus_manager,
         genesis_block_hash,
     ));
-    let share_chain_sha3x = InMemoryShareChain::new(MAX_BLOCKS_COUNT, PowAlgorithm::Sha3x, None)?;
+    let share_chain_sha3x = InMemoryShareChain::new(MAX_BLOCKS_COUNT, BLOCKS_EXPIRATION, PowAlgorithm::Sha3x, None)?;
     let share_chain_random_x = InMemoryShareChain::new(
         MAX_BLOCKS_COUNT,
+        BLOCKS_EXPIRATION,
         PowAlgorithm::RandomX,
         Some(block_validation_params.clone()),
     )?;
