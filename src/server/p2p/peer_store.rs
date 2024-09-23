@@ -15,7 +15,7 @@ use tari_utilities::epoch_time::EpochTime;
 
 use crate::server::p2p::{messages::PeerInfo, Tribe};
 
-const LOG_TARGET: &str = "p2pool::server::p2p::peer_store";
+const LOG_TARGET: &str = "tari::p2pool::server::p2p::peer_store";
 const PEER_BAN_TIME: Duration = Duration::from_secs(60 * 5);
 
 #[derive(Copy, Clone, Debug)]
@@ -97,6 +97,9 @@ impl PeerStore {
     /// Add a new peer to store.
     /// If a peer already exists, just replaces it.
     pub async fn add(&self, peer_id: PeerId, peer_info: PeerInfo) {
+        if self.banned_peers.contains_key(&peer_id) {
+            return;
+        }
         let removal_count = self.peer_removals.get(&peer_id).await.unwrap_or(0);
         if removal_count >= self.peers_max_fail {
             warn!("Banning peer {peer_id:?} for {:?}!", PEER_BAN_TIME);
@@ -113,6 +116,9 @@ impl PeerStore {
 
     /// Removes a peer from store.
     pub async fn remove(&self, peer_id: &PeerId) {
+        if self.banned_peers.contains_key(peer_id) {
+            return;
+        }
         self.peers.remove(peer_id).await;
 
         // counting peer removals
