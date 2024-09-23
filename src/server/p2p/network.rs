@@ -151,7 +151,7 @@ impl Default for Config {
         Self {
             external_addr: None,
             seed_peers: vec![],
-            peer_info_publish_interval: Duration::from_secs(60 * 5),
+            peer_info_publish_interval: Duration::from_secs(10),
             stable_peer: false,
             private_key_folder: PathBuf::from("."),
             private_key: None,
@@ -764,9 +764,14 @@ where S: ShareChain
     /// Main method to handle libp2p events.
     #[allow(clippy::too_many_lines)]
     async fn handle_event(&mut self, event: SwarmEvent<ServerNetworkBehaviourEvent>) {
+        let local_peer_id = *self.swarm.local_peer_id();
         match event {
             SwarmEvent::NewListenAddr { address, .. } => {
                 debug!(target: LOG_TARGET, tribe = &self.config.tribe; "Listening on {address:?}");
+                if address.is_global_ip() {
+                    info!(target: LOG_TARGET, "Adding listening address to DHT: {address:?}");
+                    self.swarm.behaviour_mut().kademlia.add_address(&local_peer_id, address);
+                }
             },
             SwarmEvent::Behaviour(event) => match event {
                 ServerNetworkBehaviourEvent::Mdns(mdns_event) => match mdns_event {
@@ -857,7 +862,7 @@ where S: ShareChain
                     debug!(target: LOG_TARGET, "[RELAY SERVER]: {event:?}");
                 },
                 ServerNetworkBehaviourEvent::RelayClient(event) => {
-                    debug!(target: LOG_TARGET, "[RELAY CLIENT]: {event:?}");
+                    info!(target: LOG_TARGET, "[RELAY CLIENT]: {event:?}");
                 },
                 ServerNetworkBehaviourEvent::Dcutr(event) => {
                     debug!(target: LOG_TARGET, "[DCUTR]: {event:?}");
@@ -1082,9 +1087,15 @@ where S: ShareChain
 
     /// Adding all peer addresses to kademlia DHT and run bootstrap to get peers.
     async fn join_seed_peers(&mut self, seed_peers: HashMap<PeerId, Multiaddr>) -> Result<(), Error> {
+        let mut relay_store_lock = self.relay_store.write().await;
         seed_peers.iter().for_each(|(peer_id, addr)| {
+            relay_store_lock.add_possible_relay(*peer_id, addr.clone());
+            // if let Err(error) = self.swarm.dial(DialOpts::peer_id(*peer_id).addresses(vec![addr.clone()]).build()) {
+            //     warn!(target: LOG_TARGET, "Failed to dial seed peer: {error:?}");
+            // }
             self.swarm.behaviour_mut().kademlia.add_address(peer_id, addr.clone());
         });
+        drop(relay_store_lock);
 
         if !seed_peers.is_empty() {
             self.bootstrap_kademlia()?;

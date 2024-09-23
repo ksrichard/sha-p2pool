@@ -27,7 +27,7 @@ pub struct PeerStoreConfig {
 impl Default for PeerStoreConfig {
     fn default() -> Self {
         Self {
-            peer_record_ttl: Duration::from_secs(10),
+            peer_record_ttl: Duration::from_secs(60 * 10),
             peers_max_fail: 2,
         }
     }
